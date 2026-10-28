@@ -367,12 +367,37 @@ void free_acl_state(struct posix_acl_state *state)
 	kfree(state->groups);
 }
 
-static void parse_dacl(struct mnt_idmap *idmap,
-		       struct smb_acl *pdacl, char *end_of_acl,
-		       struct smb_sid *pownersid, struct smb_sid *pgrpsid,
-		       struct smb_fattr *fattr)
+/*
+ * Return the size of @ace if its header, access mask and SID (including all
+ * sub-authorities) lie within both @remaining bytes and the ACE's own size
+ * field, or -EINVAL otherwise.
+ */
+static int smb_ace_size(const struct smb_ace *ace, size_t remaining)
 {
-	int i, ret;
+	size_t min_size = offsetof(struct smb_ace, sid) +
+			  offsetof(struct smb_sid, sub_auth);
+	u16 ace_size;
+
+	if (remaining < min_size)
+		return -EINVAL;
+
+	if (ace->sid.num_subauth > SID_MAX_SUB_AUTHORITIES)
+		return -EINVAL;
+
+	ace_size = le16_to_cpu(ace->size);
+	if (ace_size > remaining ||
+	    ace_size < min_size + sizeof(__le32) * ace->sid.num_subauth)
+		return -EINVAL;
+
+	return ace_size;
+}
+
+static int parse_dacl(struct mnt_idmap *idmap,
+		      struct smb_acl *pdacl, char *end_of_acl,
+		      struct smb_sid *pownersid, struct smb_sid *pgrpsid,
+		      struct smb_fattr *fattr)
+{
+	int i, ret, ace_size;
 	u16 num_aces = 0;
 	unsigned int acl_size;
 	char *acl_base;
@@ -383,13 +408,14 @@ static void parse_dacl(struct mnt_idmap *idmap,
 	bool owner_found = false, group_found = false, others_found = false;
 
 	if (!pdacl)
-		return;
+		return 0;
 
 	/* validate that we do not go past end of acl */
 	if (end_of_acl < (char *)pdacl + sizeof(struct smb_acl) ||
+	    le16_to_cpu(pdacl->size) < sizeof(struct smb_acl) ||
 	    end_of_acl < (char *)pdacl + le16_to_cpu(pdacl->size)) {
 		pr_err("ACL too small to parse DACL\n");
-		return;
+		return -EINVAL;
 	}
 
 	ksmbd_debug(SMB, "DACL revision %d size %d num aces %d\n",
@@ -401,27 +427,27 @@ static void parse_dacl(struct mnt_idmap *idmap,
 
 	num_aces = le16_to_cpu(pdacl->num_aces);
 	if (num_aces <= 0)
-		return;
+		return 0;
 
 	if (num_aces > (le16_to_cpu(pdacl->size) - sizeof(struct smb_acl)) /
 			(offsetof(struct smb_ace, sid) +
 			 offsetof(struct smb_sid, sub_auth) + sizeof(__le16)))
-		return;
+		return -EINVAL;
 
 	ret = init_acl_state(&acl_state, num_aces);
 	if (ret)
-		return;
+		return ret;
 	ret = init_acl_state(&default_acl_state, num_aces);
 	if (ret) {
 		free_acl_state(&acl_state);
-		return;
+		return ret;
 	}
 
 	ppace = kmalloc_array(num_aces, sizeof(struct smb_ace *), KSMBD_DEFAULT_GFP);
 	if (!ppace) {
 		free_acl_state(&default_acl_state);
 		free_acl_state(&acl_state);
-		return;
+		return -ENOMEM;
 	}
 
 	/*
@@ -430,24 +456,25 @@ static void parse_dacl(struct mnt_idmap *idmap,
 	 * user/group/other have no permissions
 	 */
 	for (i = 0; i < num_aces; ++i) {
-		if (end_of_acl - acl_base < acl_size)
-			break;
+		if (end_of_acl - acl_base < acl_size) {
+			ret = -EINVAL;
+			goto free_ppace;
+		}
 
 		ppace[i] = (struct smb_ace *)(acl_base + acl_size);
 		acl_base = (char *)ppace[i];
-		acl_size = offsetof(struct smb_ace, sid) +
-			offsetof(struct smb_sid, sub_auth);
 
-		if (end_of_acl - acl_base < acl_size ||
-		    ppace[i]->sid.num_subauth == 0 ||
-		    ppace[i]->sid.num_subauth > SID_MAX_SUB_AUTHORITIES ||
-		    (end_of_acl - acl_base <
-		     acl_size + sizeof(__le32) * ppace[i]->sid.num_subauth) ||
-		    (le16_to_cpu(ppace[i]->size) <
-		     acl_size + sizeof(__le32) * ppace[i]->sid.num_subauth))
+		ace_size = smb_ace_size(ppace[i], end_of_acl - acl_base);
+		if (ace_size < 0) {
+			pr_err("%s: malformed ACE %d\n", __func__, i);
+			ret = ace_size;
+			goto free_ppace;
+		}
+
+		if (ppace[i]->sid.num_subauth == 0)
 			break;
 
-		acl_size = le16_to_cpu(ppace[i]->size);
+		acl_size = ace_size;
 		ppace[i]->access_req =
 			smb_map_generic_desired_access(ppace[i]->access_req);
 
@@ -584,6 +611,13 @@ static void parse_dacl(struct mnt_idmap *idmap,
 	}
 	free_acl_state(&acl_state);
 	free_acl_state(&default_acl_state);
+	return 0;
+
+free_ppace:
+	kfree(ppace);
+	free_acl_state(&acl_state);
+	free_acl_state(&default_acl_state);
+	return ret;
 }
 
 static void set_posix_acl_entries_dacl(struct mnt_idmap *idmap,
@@ -908,8 +942,12 @@ int parse_sec_desc(struct mnt_idmap *idmap, struct smb_ntsd *pntsd,
 		if (dacloffset < sizeof(struct smb_ntsd))
 			return -EINVAL;
 
-		parse_dacl(idmap, dacl_ptr, end_of_acl,
-			   owner_sid_ptr, group_sid_ptr, fattr);
+		rc = parse_dacl(idmap, dacl_ptr, end_of_acl,
+				owner_sid_ptr, group_sid_ptr, fattr);
+		if (rc) {
+			pr_err("%s: Error %d parsing DACL\n", __func__, rc);
+			return rc;
+		}
 	}
 
 	return 0;
@@ -1080,11 +1118,8 @@ int smb_inherit_dacl(struct ksmbd_conn *conn,
 	for (i = 0; i < num_aces; i++) {
 		int pace_size;
 
-		if (offsetof(struct smb_ace, access_req) > aces_size)
-			break;
-
-		pace_size = le16_to_cpu(parent_aces->size);
-		if (pace_size > aces_size)
+		pace_size = smb_ace_size(parent_aces, aces_size);
+		if (pace_size < 0)
 			break;
 
 		aces_size -= pace_size;
@@ -1261,7 +1296,7 @@ int smb_check_perm_dacl(struct ksmbd_conn *conn, const struct path *path,
 	struct smb_ace *others_ace = NULL;
 	struct posix_acl_entry *pa_entry;
 	unsigned int sid_type = SIDOWNER;
-	unsigned short ace_size;
+	int ace_size;
 
 	ksmbd_debug(SMB, "check permission using windows acl\n");
 	pntsd_size = ksmbd_vfs_get_sd_xattr(conn, idmap,
@@ -1298,14 +1333,12 @@ int smb_check_perm_dacl(struct ksmbd_conn *conn, const struct path *path,
 		ace = (struct smb_ace *)((char *)pdacl + sizeof(struct smb_acl));
 		aces_size = acl_size - sizeof(struct smb_acl);
 		for (i = 0; i < le16_to_cpu(pdacl->num_aces); i++) {
-			if (offsetof(struct smb_ace, access_req) > aces_size)
-				break;
-			ace_size = le16_to_cpu(ace->size);
-			if (ace_size > aces_size)
+			ace_size = smb_ace_size(ace, aces_size);
+			if (ace_size < 0)
 				break;
 			aces_size -= ace_size;
 			granted |= le32_to_cpu(ace->access_req);
-			ace = (struct smb_ace *)((char *)ace + le16_to_cpu(ace->size));
+			ace = (struct smb_ace *)((char *)ace + ace_size);
 		}
 
 		if (!pdacl->num_aces)
@@ -1319,10 +1352,8 @@ int smb_check_perm_dacl(struct ksmbd_conn *conn, const struct path *path,
 	ace = (struct smb_ace *)((char *)pdacl + sizeof(struct smb_acl));
 	aces_size = acl_size - sizeof(struct smb_acl);
 	for (i = 0; i < le16_to_cpu(pdacl->num_aces); i++) {
-		if (offsetof(struct smb_ace, access_req) > aces_size)
-			break;
-		ace_size = le16_to_cpu(ace->size);
-		if (ace_size > aces_size)
+		ace_size = smb_ace_size(ace, aces_size);
+		if (ace_size < 0)
 			break;
 		aces_size -= ace_size;
 
@@ -1334,7 +1365,7 @@ int smb_check_perm_dacl(struct ksmbd_conn *conn, const struct path *path,
 		if (!compare_sids(&sid_everyone, &ace->sid))
 			others_ace = ace;
 
-		ace = (struct smb_ace *)((char *)ace + le16_to_cpu(ace->size));
+		ace = (struct smb_ace *)((char *)ace + ace_size);
 	}
 
 	if (*pdaccess & FILE_MAXIMAL_ACCESS_LE && found) {
