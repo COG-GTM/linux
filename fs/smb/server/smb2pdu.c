@@ -1681,6 +1681,7 @@ int smb2_sess_setup(struct ksmbd_work *work)
 	struct ksmbd_session *sess;
 	struct negotiate_message *negblob;
 	unsigned int negblob_len, negblob_off;
+	bool binding_req = false;
 	int rc = 0;
 
 	ksmbd_debug(SMB, "Received smb2 session setup request\n");
@@ -1715,6 +1716,7 @@ int smb2_sess_setup(struct ksmbd_work *work)
 		   req->Flags & SMB2_SESSION_REQ_FLAG_BINDING) {
 		u64 sess_id = le64_to_cpu(req->hdr.SessionId);
 
+		binding_req = true;
 		sess = ksmbd_session_lookup_slowpath(sess_id);
 		if (!sess) {
 			rc = -ENOENT;
@@ -1918,8 +1920,14 @@ out_err:
 			if (sess->user && sess->user->flags & KSMBD_USER_FLAG_DELAY_SESSION)
 				try_delay = true;
 
-			sess->last_active = jiffies;
-			sess->state = SMB2_SESSION_EXPIRED;
+			/*
+			 * A failed binding request has not proven ownership of
+			 * the session it names, so it must not expire it.
+			 */
+			if (!binding_req) {
+				sess->last_active = jiffies;
+				sess->state = SMB2_SESSION_EXPIRED;
+			}
 			ksmbd_user_session_put(sess);
 			work->sess = NULL;
 			if (try_delay) {
