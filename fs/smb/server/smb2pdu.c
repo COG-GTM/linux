@@ -1273,6 +1273,8 @@ err_out:
 static int alloc_preauth_hash(struct ksmbd_session *sess,
 			      struct ksmbd_conn *conn)
 {
+	lockdep_assert_held(&sess->preauth_lock);
+
 	if (sess->Preauth_HashValue)
 		return 0;
 
@@ -1621,11 +1623,13 @@ static int krb5_authenticate(struct ksmbd_work *work,
 
 	rsp->SecurityBufferLength = cpu_to_le16(out_len);
 
-	if ((conn->sign || server_conf.enforced_signing) ||
-	    (req->SecurityMode & SMB2_NEGOTIATE_SIGNING_REQUIRED))
+	/* binding keeps an encrypted session's existing keys and !sign */
+	if (((conn->sign || server_conf.enforced_signing) ||
+	     (req->SecurityMode & SMB2_NEGOTIATE_SIGNING_REQUIRED)) &&
+	    !(conn->binding && sess->enc))
 		sess->sign = true;
 
-	if (smb3_encryption_negotiated(conn)) {
+	if (smb3_encryption_negotiated(conn) && !conn->binding) {
 		retval = conn->ops->generate_encryptionkey(conn, sess);
 		if (retval) {
 			ksmbd_debug(SMB,
@@ -1681,6 +1685,7 @@ int smb2_sess_setup(struct ksmbd_work *work)
 	struct ksmbd_session *sess;
 	struct negotiate_message *negblob;
 	unsigned int negblob_len, negblob_off;
+	bool preauth_locked = false;
 	int rc = 0;
 
 	ksmbd_debug(SMB, "Received smb2 session setup request\n");
@@ -1817,6 +1822,14 @@ int smb2_sess_setup(struct ksmbd_work *work)
 	}
 
 	if (server_conf.auth_mechs & conn->auth_mechs) {
+		/*
+		 * sess->Preauth_HashValue is shared by every channel bound to
+		 * the session, so serialize its use and release against
+		 * session setups running on other connections.
+		 */
+		mutex_lock(&sess->preauth_lock);
+		preauth_locked = true;
+
 		rc = generate_preauth_hash(work);
 		if (rc)
 			goto out_err;
@@ -1833,8 +1846,10 @@ int smb2_sess_setup(struct ksmbd_work *work)
 				ksmbd_conn_set_good(conn);
 				sess->state = SMB2_SESSION_VALID;
 			}
-			kfree(sess->Preauth_HashValue);
-			sess->Preauth_HashValue = NULL;
+			if (!conn->binding) {
+				kfree(sess->Preauth_HashValue);
+				sess->Preauth_HashValue = NULL;
+			}
 		} else if (conn->preferred_auth_mech == KSMBD_AUTH_NTLMSSP) {
 			if (negblob->MessageType == NtLmNegotiate) {
 				rc = ntlm_negotiate(work, negblob, negblob_len, rsp);
@@ -1860,9 +1875,10 @@ int smb2_sess_setup(struct ksmbd_work *work)
 						list_del(&preauth_sess->preauth_entry);
 						kfree(preauth_sess);
 					}
+				} else {
+					kfree(sess->Preauth_HashValue);
+					sess->Preauth_HashValue = NULL;
 				}
-				kfree(sess->Preauth_HashValue);
-				sess->Preauth_HashValue = NULL;
 			} else {
 				pr_info_ratelimited("Unknown NTLMSSP message type : 0x%x\n",
 						le32_to_cpu(negblob->MessageType));
@@ -1879,6 +1895,9 @@ int smb2_sess_setup(struct ksmbd_work *work)
 	}
 
 out_err:
+	if (preauth_locked)
+		mutex_unlock(&sess->preauth_lock);
+
 	if (rc == -EINVAL)
 		rsp->hdr.Status = STATUS_INVALID_PARAMETER;
 	else if (rc == -ENOENT)
@@ -9025,13 +9044,17 @@ void smb3_preauth_hash_rsp(struct ksmbd_work *work)
 			if (!preauth_sess)
 				return;
 			hash_value = preauth_sess->Preauth_HashValue;
+			ksmbd_gen_preauth_integrity_hash(conn, work->response_buf,
+							 hash_value);
 		} else {
+			mutex_lock(&sess->preauth_lock);
 			hash_value = sess->Preauth_HashValue;
-			if (!hash_value)
-				return;
+			if (hash_value)
+				ksmbd_gen_preauth_integrity_hash(conn,
+								 work->response_buf,
+								 hash_value);
+			mutex_unlock(&sess->preauth_lock);
 		}
-		ksmbd_gen_preauth_integrity_hash(conn, work->response_buf,
-						 hash_value);
 	}
 }
 

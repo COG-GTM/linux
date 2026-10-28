@@ -447,6 +447,7 @@ static struct ksmbd_session *__session_create(int protocol)
 	rwlock_init(&sess->tree_conns_lock);
 	atomic_set(&sess->refcnt, 2);
 	init_rwsem(&sess->rpc_lock);
+	mutex_init(&sess->preauth_lock);
 
 	ret = __init_smb2_session(sess);
 	if (ret)

@@ -7,6 +7,7 @@
 #define __USER_SESSION_MANAGEMENT_H__
 
 #include <linux/hashtable.h>
+#include <linux/mutex.h>
 #include <linux/xarray.h>
 
 #include "../smb_common.h"
@@ -44,6 +45,8 @@ struct ksmbd_session {
 	bool				is_anonymous;
 
 	int				state;
+	/* protected by preauth_lock; shared by every channel of the session */
+	struct mutex			preauth_lock;
 	__u8				*Preauth_HashValue;
 
 	char				sess_key[CIFS_KEY_SIZE];

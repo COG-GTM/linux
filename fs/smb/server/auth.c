@@ -839,6 +839,9 @@ int ksmbd_gen_smb311_signingkey(struct ksmbd_session *sess,
 			return -ENOENT;
 		d.context.iov_base = preauth_sess->Preauth_HashValue;
 	} else {
+		lockdep_assert_held(&sess->preauth_lock);
+		if (!sess->Preauth_HashValue)
+			return -EINVAL;
 		d.context.iov_base = sess->Preauth_HashValue;
 	}
 	d.context.iov_len = 64;
@@ -916,6 +919,10 @@ int ksmbd_gen_smb311_encryptionkey(struct ksmbd_conn *conn,
 {
 	struct derivation_twin twin;
 	struct derivation *d;
+
+	lockdep_assert_held(&sess->preauth_lock);
+	if (!sess->Preauth_HashValue)
+		return -EINVAL;
 
 	d = &twin.encryption;
 	d->label.iov_base = "SMBS2CCipherKey";
