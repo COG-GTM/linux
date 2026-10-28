@@ -312,6 +312,27 @@ struct ksmbd_session *ksmbd_session_lookup_slowpath(unsigned long long id)
 	return sess;
 }
 
+/*
+ * Look up a session in the global table that @conn has been bound to as a
+ * multichannel channel. Sessions owned by other connections that have no
+ * channel on @conn must not be reachable from it.
+ */
+static struct ksmbd_session *ksmbd_session_lookup_bound(struct ksmbd_conn *conn,
+							unsigned long long id)
+{
+	struct ksmbd_session *sess;
+
+	down_read(&sessions_table_lock);
+	sess = __session_lookup(id);
+	if (sess && xa_load(&sess->ksmbd_chann_list, (long)conn))
+		ksmbd_user_session_get(sess);
+	else
+		sess = NULL;
+	up_read(&sessions_table_lock);
+
+	return sess;
+}
+
 struct ksmbd_session *ksmbd_session_lookup_all(struct ksmbd_conn *conn,
 					       unsigned long long id)
 {
@@ -319,9 +340,11 @@ struct ksmbd_session *ksmbd_session_lookup_all(struct ksmbd_conn *conn,
 
 	sess = ksmbd_session_lookup(conn, id);
 	if (!sess && conn->binding)
-		sess = ksmbd_session_lookup_slowpath(id);
-	if (sess && sess->state != SMB2_SESSION_VALID)
+		sess = ksmbd_session_lookup_bound(conn, id);
+	if (sess && sess->state != SMB2_SESSION_VALID) {
+		ksmbd_user_session_put(sess);
 		sess = NULL;
+	}
 	return sess;
 }
 
