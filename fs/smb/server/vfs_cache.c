@@ -301,12 +301,17 @@ static void ksmbd_remove_durable_fd(struct ksmbd_file *fp)
 
 static void __ksmbd_remove_fd(struct ksmbd_file_table *ft, struct ksmbd_file *fp)
 {
-	if (!has_file_id(fp->volatile_id))
-		return;
-
+	/*
+	 * A disconnected durable handle has no volatile id and no file
+	 * table but is still linked on ci->m_fp_list, so always unlink it
+	 * before the ksmbd_file is freed.
+	 */
 	down_write(&fp->f_ci->m_lock);
 	list_del_init(&fp->node);
 	up_write(&fp->f_ci->m_lock);
+
+	if (!ft || !has_file_id(fp->volatile_id))
+		return;
 
 	write_lock(&ft->lock);
 	idr_remove(ft->idr, fp->volatile_id);
@@ -320,8 +325,7 @@ static void __ksmbd_close_fd(struct ksmbd_file_table *ft, struct ksmbd_file *fp)
 
 	fd_limit_close();
 	ksmbd_remove_durable_fd(fp);
-	if (ft)
-		__ksmbd_remove_fd(ft, fp);
+	__ksmbd_remove_fd(ft, fp);
 
 	close_id_del_oplock(fp);
 	filp = fp->filp;
@@ -613,6 +617,7 @@ struct ksmbd_file *ksmbd_open_fd(struct ksmbd_work *work, struct file *filp)
 
 	INIT_LIST_HEAD(&fp->blocked_works);
 	INIT_LIST_HEAD(&fp->node);
+	INIT_LIST_HEAD(&fp->scavenger_node);
 	INIT_LIST_HEAD(&fp->lock_list);
 	spin_lock_init(&fp->f_lock);
 	atomic_set(&fp->refcount, 1);
@@ -749,8 +754,8 @@ static void ksmbd_scavenger_dispose_dh(struct list_head *head)
 	while (!list_empty(head)) {
 		struct ksmbd_file *fp;
 
-		fp = list_first_entry(head, struct ksmbd_file, node);
-		list_del_init(&fp->node);
+		fp = list_first_entry(head, struct ksmbd_file, scavenger_node);
+		list_del_init(&fp->scavenger_node);
 		__ksmbd_close_fd(NULL, fp);
 	}
 }
@@ -793,8 +798,16 @@ static int ksmbd_durable_scavenger(void *dummy)
 			found_fp_timeout = true;
 			if (fp->durable_scavenger_timeout <=
 			    jiffies_to_msecs(jiffies)) {
+				/*
+				 * fp is still reachable through
+				 * ci->m_fp_list, so claim the last
+				 * reference to stop ksmbd_fp_get() from
+				 * picking it up while it is disposed.
+				 */
+				if (atomic_cmpxchg(&fp->refcount, 1, 0) != 1)
+					continue;
 				__ksmbd_remove_durable_fd(fp);
-				list_add(&fp->node, &scavenger_list);
+				list_add(&fp->scavenger_node, &scavenger_list);
 			} else {
 				unsigned long durable_timeout;
 

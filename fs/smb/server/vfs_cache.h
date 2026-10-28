@@ -98,6 +98,8 @@ struct ksmbd_file {
 
 	struct stream			stream;
 	struct list_head		node;
+	/* durable scavenger dispose list, fp->node stays on m_fp_list */
+	struct list_head		scavenger_node;
 	struct list_head		blocked_works;
 	struct list_head		lock_list;
 
