@@ -1801,7 +1801,7 @@ int smb2_check_durable_oplock(struct ksmbd_conn *conn,
 			      struct ksmbd_share_config *share,
 			      struct ksmbd_file *fp,
 			      struct lease_ctx_info *lctx,
-			      char *name)
+			      char *name, bool posix)
 {
 	struct oplock_info *opinfo = opinfo_get(fp);
 	int ret = 0;
@@ -1865,7 +1865,7 @@ int smb2_check_durable_oplock(struct ksmbd_conn *conn,
 
 validate_name:
 	if (!ksmbd_inode_pending_delete(fp))
-		ret = ksmbd_validate_name_reconnect(share, fp, name);
+		ret = ksmbd_validate_name_reconnect(share, fp, name, posix);
 out:
 	opinfo_put(opinfo);
 	return ret;

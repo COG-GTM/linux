@@ -934,7 +934,7 @@ void ksmbd_free_global_file_table(void)
 }
 
 int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
-				  struct ksmbd_file *fp, char *name)
+				  struct ksmbd_file *fp, char *name, bool posix)
 {
 	char *pathname, *ab_pathname, *sharename, *ab_sharename, *rel;
 	size_t share_len;
@@ -973,7 +973,8 @@ int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
 			rel++;
 	}
 
-	if (name && strcasecmp(rel, name)) {
+	/* POSIX names are case sensitive, others match like a normal open */
+	if (name && (posix ? strcmp(rel, name) : strcasecmp(rel, name))) {
 		ksmbd_debug(SMB, "invalid name reconnect %s\n", name);
 		ret = -EINVAL;
 	}
