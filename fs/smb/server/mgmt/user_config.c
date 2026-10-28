@@ -36,11 +36,18 @@ struct ksmbd_user *ksmbd_alloc_user(struct ksmbd_login_response *resp,
 {
 	struct ksmbd_user *user;
 
+	if (resp->hash_sz > sizeof(resp->hash)) {
+		pr_err("invalid hash size(%u) in login response\n",
+		       resp->hash_sz);
+		return NULL;
+	}
+
 	user = kmalloc(sizeof(struct ksmbd_user), KSMBD_DEFAULT_GFP);
 	if (!user)
 		return NULL;
 
-	user->name = kstrdup(resp->account, KSMBD_DEFAULT_GFP);
+	user->name = kstrndup(resp->account, sizeof(resp->account),
+			      KSMBD_DEFAULT_GFP);
 	user->flags = resp->status;
 	user->gid = resp->gid;
 	user->uid = resp->uid;
@@ -101,7 +108,8 @@ bool ksmbd_compare_user(struct ksmbd_user *u1, struct ksmbd_user *u2)
 {
 	if (strcmp(u1->name, u2->name))
 		return false;
-	if (memcmp(u1->passkey, u2->passkey, u1->passkey_sz))
+	if (u1->passkey_sz != u2->passkey_sz ||
+	    memcmp(u1->passkey, u2->passkey, u1->passkey_sz))
 		return false;
 
 	return true;
