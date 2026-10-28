@@ -129,6 +129,11 @@ static int calc_ntlmv2_hash(struct ksmbd_conn *conn, struct ksmbd_session *sess,
 	__le16 *uniname = NULL;
 	struct ksmbd_crypto_ctx *ctx;
 
+	if (sess->user->passkey_sz < CIFS_ENCPWD_SIZE) {
+		ksmbd_debug(AUTH, "NT hash is too short\n");
+		return -EINVAL;
+	}
+
 	ctx = ksmbd_crypto_ctx_find_hmacmd5();
 	if (!ctx) {
 		ksmbd_debug(AUTH, "can't generate ntlmv2 hash\n");

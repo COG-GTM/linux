@@ -8,7 +8,6 @@
 
 #include "user_config.h"
 #include "../transport_ipc.h"
-#include "../ntlmssp.h"
 
 struct ksmbd_user *ksmbd_login_user(const char *account)
 {
@@ -37,9 +36,7 @@ struct ksmbd_user *ksmbd_alloc_user(struct ksmbd_login_response *resp,
 {
 	struct ksmbd_user *user;
 
-	if (resp->hash_sz > sizeof(resp->hash) ||
-	    (!(resp->status & KSMBD_USER_FLAG_GUEST_ACCOUNT) &&
-	     resp->hash_sz < CIFS_ENCPWD_SIZE)) {
+	if (resp->hash_sz > sizeof(resp->hash)) {
 		pr_err("invalid hash size(%u) in login response\n",
 		       resp->hash_sz);
 		return NULL;
@@ -111,7 +108,8 @@ bool ksmbd_compare_user(struct ksmbd_user *u1, struct ksmbd_user *u2)
 {
 	if (strcmp(u1->name, u2->name))
 		return false;
-	if (memcmp(u1->passkey, u2->passkey, u1->passkey_sz))
+	if (u1->passkey_sz != u2->passkey_sz ||
+	    memcmp(u1->passkey, u2->passkey, u1->passkey_sz))
 		return false;
 
 	return true;

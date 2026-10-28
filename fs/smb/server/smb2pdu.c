@@ -5566,10 +5566,10 @@ static int smb2_get_info_filesystem(struct ksmbd_work *work,
 
 		info = (struct object_id_info *)(rsp->Buffer);
 
+		memset(info->objid, 0, 16);
 		if (!user_guest(sess->user))
-			memcpy(info->objid, user_passkey(sess->user), 16);
-		else
-			memset(info->objid, 0, 16);
+			memcpy(info->objid, user_passkey(sess->user),
+			       min_t(unsigned int, sess->user->passkey_sz, 16));
 
 		info->extended_info.magic = cpu_to_le32(EXTENDED_INFO_MAGIC);
 		info->extended_info.version = cpu_to_le32(1);
