@@ -36,6 +36,8 @@ static DECLARE_RWSEM(ipc_msg_table_lock);
 static DEFINE_MUTEX(startup_lock);
 
 static DEFINE_IDA(ipc_ida);
+static DEFINE_MUTEX(ipc_ida_lock);
+static int ipc_ida_next;
 
 static unsigned int ksmbd_tools_pid;
 
@@ -594,7 +596,7 @@ struct ksmbd_login_response *ksmbd_ipc_login_request(const char *account)
 
 	msg->type = KSMBD_EVENT_LOGIN_REQUEST;
 	req = (struct ksmbd_login_request *)msg->payload;
-	req->handle = ksmbd_acquire_id(&ipc_ida);
+	req->handle = ksmbd_ipc_id_alloc();
 	strscpy(req->account, account, KSMBD_REQ_MAX_ACCOUNT_NAME_SZ);
 
 	resp = ipc_msg_send_request(msg, req->handle);
@@ -618,7 +620,7 @@ struct ksmbd_login_response_ext *ksmbd_ipc_login_request_ext(const char *account
 
 	msg->type = KSMBD_EVENT_LOGIN_REQUEST_EXT;
 	req = (struct ksmbd_login_request *)msg->payload;
-	req->handle = ksmbd_acquire_id(&ipc_ida);
+	req->handle = ksmbd_ipc_id_alloc();
 	strscpy(req->account, account, KSMBD_REQ_MAX_ACCOUNT_NAME_SZ);
 	resp = ipc_msg_send_request(msg, req->handle);
 	ipc_msg_handle_free(req->handle);
@@ -643,7 +645,7 @@ ksmbd_ipc_spnego_authen_request(const char *spnego_blob, int blob_len)
 
 	msg->type = KSMBD_EVENT_SPNEGO_AUTHEN_REQUEST;
 	req = (struct ksmbd_spnego_authen_request *)msg->payload;
-	req->handle = ksmbd_acquire_id(&ipc_ida);
+	req->handle = ksmbd_ipc_id_alloc();
 	req->spnego_blob_len = blob_len;
 	memcpy(req->spnego_blob, spnego_blob, blob_len);
 
@@ -676,7 +678,7 @@ ksmbd_ipc_tree_connect_request(struct ksmbd_session *sess,
 	msg->type = KSMBD_EVENT_TREE_CONNECT_REQUEST;
 	req = (struct ksmbd_tree_connect_request *)msg->payload;
 
-	req->handle = ksmbd_acquire_id(&ipc_ida);
+	req->handle = ksmbd_ipc_id_alloc();
 	req->account_flags = sess->user->flags;
 	req->session_id = sess->id;
 	req->connect_id = tree_conn->id;
@@ -755,7 +757,7 @@ ksmbd_ipc_share_config_request(const char *name)
 
 	msg->type = KSMBD_EVENT_SHARE_CONFIG_REQUEST;
 	req = (struct ksmbd_share_config_request *)msg->payload;
-	req->handle = ksmbd_acquire_id(&ipc_ida);
+	req->handle = ksmbd_ipc_id_alloc();
 	strscpy(req->share_name, name, KSMBD_REQ_MAX_SHARE_NAME);
 
 	resp = ipc_msg_send_request(msg, req->handle);
@@ -930,9 +932,25 @@ static void ipc_timer_heartbeat(struct work_struct *w)
 		server_queue_ctrl_reset_work();
 }
 
+/*
+ * Hand out IPC handles cyclically so that a handle released after a
+ * request timed out is not reused until the id space wraps. Otherwise a
+ * late daemon response could be matched to a newer request that got the
+ * same (lowest free) handle.
+ */
 int ksmbd_ipc_id_alloc(void)
 {
-	return ksmbd_acquire_id(&ipc_ida);
+	int id;
+
+	mutex_lock(&ipc_ida_lock);
+	id = ida_alloc_min(&ipc_ida, ipc_ida_next, KSMBD_DEFAULT_GFP);
+	if (id == -ENOSPC && ipc_ida_next)
+		id = ida_alloc(&ipc_ida, KSMBD_DEFAULT_GFP);
+	if (id >= 0)
+		ipc_ida_next = id == INT_MAX ? 0 : id + 1;
+	mutex_unlock(&ipc_ida_lock);
+
+	return id;
 }
 
 void ksmbd_rpc_id_free(int handle)
