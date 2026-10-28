@@ -8067,6 +8067,14 @@ static inline int fsctl_set_sparse(struct ksmbd_work *work, u64 id,
 	fp = ksmbd_lookup_fd_fast(work, id);
 	if (!fp)
 		return -ENOENT;
+
+	if (!(fp->daccess & FILE_WRITE_ATTRIBUTES_LE)) {
+		ksmbd_debug(SMB, "no right to set sparse attribute : 0x%x\n",
+			    le32_to_cpu(fp->daccess));
+		ret = -EACCES;
+		goto out;
+	}
+
 	idmap = file_mnt_idmap(fp->filp);
 
 	old_fattr = fp->f_ci->m_fattr;
@@ -8275,6 +8283,13 @@ int smb2_ioctl(struct ksmbd_work *work)
 				rsp);
 		break;
 	case FSCTL_SET_SPARSE:
+		if (!test_tree_conn_flag(work->tcon, KSMBD_TREE_CONN_FLAG_WRITABLE)) {
+			ksmbd_debug(SMB,
+				    "User does not have write permission\n");
+			ret = -EACCES;
+			goto out;
+		}
+
 		if (in_buf_len < sizeof(struct file_sparse)) {
 			ret = -EINVAL;
 			goto out;
@@ -8373,6 +8388,13 @@ int smb2_ioctl(struct ksmbd_work *work)
 		struct duplicate_extents_to_file *dup_ext;
 		loff_t src_off, dst_off, length, cloned;
 
+		if (!test_tree_conn_flag(work->tcon, KSMBD_TREE_CONN_FLAG_WRITABLE)) {
+			ksmbd_debug(SMB,
+				    "User does not have write permission\n");
+			ret = -EACCES;
+			goto out;
+		}
+
 		if (in_buf_len < sizeof(struct duplicate_extents_to_file)) {
 			ret = -EINVAL;
 			goto out;
@@ -8392,6 +8414,16 @@ int smb2_ioctl(struct ksmbd_work *work)
 		if (!fp_out) {
 			pr_err("not found fp\n");
 			ret = -ENOENT;
+			goto dup_ext_out;
+		}
+
+		if (!(fp_in->daccess & FILE_READ_DATA_LE) ||
+		    !(fp_out->daccess & FILE_WRITE_DATA_LE)) {
+			ksmbd_debug(SMB,
+				    "no right to duplicate extents : 0x%x -> 0x%x\n",
+				    le32_to_cpu(fp_in->daccess),
+				    le32_to_cpu(fp_out->daccess));
+			ret = -EACCES;
 			goto dup_ext_out;
 		}
 
