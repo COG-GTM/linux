@@ -930,9 +930,27 @@ void ksmbd_free_global_file_table(void)
 	kfree(global_ft.idr);
 }
 
+static const char *ksmbd_share_relative_name(struct ksmbd_share_config *share,
+					     const char *ab_pathname)
+{
+	const char *rel_name;
+
+	if (!share->path || !share->path_sz ||
+	    strncmp(ab_pathname, share->path, share->path_sz))
+		return NULL;
+
+	rel_name = ab_pathname + share->path_sz;
+	if (*rel_name == '/')
+		return rel_name + 1;
+	if (*rel_name == '\0' || share->path[share->path_sz - 1] == '/')
+		return rel_name;
+	return NULL;
+}
+
 int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
 				  struct ksmbd_file *fp, char *name)
 {
+	const char *rel_name;
 	char *pathname, *ab_pathname;
 	int ret = 0;
 
@@ -946,9 +964,12 @@ int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
 		return -EACCES;
 	}
 
-	if (name && strcmp(&ab_pathname[share->path_sz + 1], name)) {
-		ksmbd_debug(SMB, "invalid name reconnect %s\n", name);
-		ret = -EINVAL;
+	if (name) {
+		rel_name = ksmbd_share_relative_name(share, ab_pathname);
+		if (!rel_name || strcmp(rel_name, name)) {
+			ksmbd_debug(SMB, "invalid name reconnect %s\n", name);
+			ret = -EINVAL;
+		}
 	}
 
 	kfree(pathname);
