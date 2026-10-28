@@ -358,6 +358,45 @@ struct preauth_session *ksmbd_preauth_session_alloc(struct ksmbd_conn *conn,
 	return sess;
 }
 
+/*
+ * Register @conn as a channel of @sess. Refused while @sess is being torn
+ * down by destroy_previous_session(), so every channel is either seen by
+ * the teardown drain or never added.
+ */
+int ksmbd_session_add_channel(struct ksmbd_conn *conn,
+			      struct ksmbd_session *sess)
+{
+	struct channel *chann;
+	void *old;
+	int rc = 0;
+
+	down_read(&sessions_table_lock);
+	if (sess->destroying) {
+		rc = -EACCES;
+		goto out;
+	}
+
+	if (xa_load(&sess->ksmbd_chann_list, (long)conn))
+		goto out;
+
+	chann = kmalloc(sizeof(struct channel), KSMBD_DEFAULT_GFP);
+	if (!chann) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	chann->conn = conn;
+	old = xa_store(&sess->ksmbd_chann_list, (long)conn, chann,
+		       KSMBD_DEFAULT_GFP);
+	if (xa_is_err(old)) {
+		kfree(chann);
+		rc = xa_err(old);
+	}
+out:
+	up_read(&sessions_table_lock);
+	return rc;
+}
+
 void destroy_previous_session(struct ksmbd_conn *conn,
 			      struct ksmbd_user *user, u64 id)
 {
@@ -368,7 +407,8 @@ void destroy_previous_session(struct ksmbd_conn *conn,
 	down_write(&sessions_table_lock);
 	down_write(&conn->session_lock);
 	prev_sess = __session_lookup(id);
-	if (!prev_sess || prev_sess->state == SMB2_SESSION_EXPIRED)
+	if (!prev_sess || prev_sess->state == SMB2_SESSION_EXPIRED ||
+	    prev_sess->destroying)
 		goto out;
 
 	prev_user = prev_sess->user;
@@ -378,17 +418,32 @@ void destroy_previous_session(struct ksmbd_conn *conn,
 	    memcmp(user->passkey, prev_user->passkey, user->passkey_sz))
 		goto out;
 
-	ksmbd_all_conn_set_status(id, KSMBD_SESS_NEED_RECONNECT);
-	err = ksmbd_conn_wait_idle_sess_id(conn, id);
-	if (err) {
-		ksmbd_all_conn_set_status(id, KSMBD_SESS_NEED_SETUP);
-		goto out;
-	}
+	/*
+	 * Don't hold the global session lock while the old channels drain.
+	 * ->destroying keeps new channels and concurrent teardowns out.
+	 */
+	ksmbd_user_session_get(prev_sess);
+	WRITE_ONCE(prev_sess->destroying, true);
+	ksmbd_all_conn_set_status(prev_sess, KSMBD_SESS_NEED_RECONNECT);
+	up_write(&conn->session_lock);
+	up_write(&sessions_table_lock);
 
-	ksmbd_destroy_file_table(&prev_sess->file_table);
-	prev_sess->state = SMB2_SESSION_EXPIRED;
-	ksmbd_all_conn_set_status(id, KSMBD_SESS_NEED_SETUP);
-	ksmbd_launch_ksmbd_durable_scavenger();
+	err = ksmbd_conn_wait_idle_sess_id(conn, prev_sess);
+
+	down_write(&sessions_table_lock);
+	down_write(&conn->session_lock);
+	if (!err && __session_lookup(id) == prev_sess &&
+	    prev_sess->state != SMB2_SESSION_EXPIRED) {
+		ksmbd_destroy_file_table(&prev_sess->file_table);
+		prev_sess->state = SMB2_SESSION_EXPIRED;
+		ksmbd_launch_ksmbd_durable_scavenger();
+	}
+	ksmbd_all_conn_set_status(prev_sess, KSMBD_SESS_NEED_SETUP);
+	WRITE_ONCE(prev_sess->destroying, false);
+	up_write(&conn->session_lock);
+	up_write(&sessions_table_lock);
+	ksmbd_user_session_put(prev_sess);
+	return;
 out:
 	up_write(&conn->session_lock);
 	up_write(&sessions_table_lock);
