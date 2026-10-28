@@ -421,6 +421,7 @@ static void free_transport(struct smb_direct_transport *t)
 	struct smb_direct_recvmsg *recvmsg;
 
 	wake_up_interruptible(&t->wait_send_credits);
+	wake_up(&t->wait_rw_credits);
 
 	ksmbd_debug(RDMA, "wait for all send posted to IB to finish\n");
 	wait_event(t->wait_send_pending,
@@ -1405,6 +1406,17 @@ static int smb_direct_rdma_xmit(struct smb_direct_transport *t,
 	ksmbd_debug(RDMA, "RDMA %s, len %#x, needed credits %#x\n",
 		    str_read_write(is_read), buf_len, credits_needed);
 
+	/*
+	 * The credit pool never holds more than max_rw_credits, so a
+	 * request needing more could never be satisfied.
+	 */
+	if (credits_needed > t->max_rw_credits) {
+		pr_err_ratelimited("RDMA %s needs %d credits, max %d\n",
+				   str_read_write(is_read), credits_needed,
+				   t->max_rw_credits);
+		return -EINVAL;
+	}
+
 	ret = wait_for_rw_credits(t, credits_needed);
 	if (ret < 0)
 		return ret;
@@ -1549,6 +1561,7 @@ static int smb_direct_cm_handler(struct rdma_cm_id *cm_id,
 		wake_up_interruptible(&t->wait_status);
 		wake_up_interruptible(&t->wait_reassembly_queue);
 		wake_up(&t->wait_send_credits);
+		wake_up(&t->wait_rw_credits);
 		break;
 	}
 	case RDMA_CM_EVENT_CONNECT_ERROR: {
