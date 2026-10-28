@@ -1023,20 +1023,35 @@ static void __detach_file_table_ids(struct ksmbd_file_table *ft)
 			break;
 		}
 
-		idr_remove(ft->idr, id);
 		if (!has_file_id(fp->volatile_id)) {
+			idr_remove(ft->idr, id);
 			id++;
 			write_unlock(&ft->lock);
 			continue;
 		}
 
-		fp->volatile_id = KSMBD_NO_FID;
+		/* final put in progress, wait for it to leave the idr */
+		if (!atomic_inc_not_zero(&fp->refcount)) {
+			write_unlock(&ft->lock);
+			cond_resched();
+			continue;
+		}
 		write_unlock(&ft->lock);
 
 		down_write(&fp->f_ci->m_lock);
+		write_lock(&ft->lock);
+		if (has_file_id(fp->volatile_id)) {
+			idr_remove(ft->idr, fp->volatile_id);
+			fp->volatile_id = KSMBD_NO_FID;
+		}
+		write_unlock(&ft->lock);
 		list_del_init(&fp->node);
 		up_write(&fp->f_ci->m_lock);
 
+		if (atomic_dec_and_test(&fp->refcount)) {
+			set_close_state_blocked_works(fp);
+			__ksmbd_close_fd(ft, fp);
+		}
 		id++;
 	}
 }
