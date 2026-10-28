@@ -1049,8 +1049,12 @@ static void __detach_file_table_ids(struct ksmbd_file_table *ft)
 		up_write(&fp->f_ci->m_lock);
 
 		if (atomic_dec_and_test(&fp->refcount)) {
+			struct ksmbd_conn *conn = fp->conn;
+
 			set_close_state_blocked_works(fp);
 			__ksmbd_close_fd(ft, fp);
+			if (conn)
+				atomic_dec(&conn->stats.open_files_count);
 		}
 		id++;
 	}
