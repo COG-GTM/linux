@@ -581,7 +581,8 @@ static int smb2_check_req_protection(struct ksmbd_work *work,
 {
 	struct ksmbd_session *sess = work->sess;
 
-	if (cmd == SMB2_OPLOCK_BREAK_HE || cmd == SMB2_CANCEL_HE)
+	/* CANCEL only acts on requests already pending on this connection */
+	if (cmd == SMB2_CANCEL_HE)
 		return 1;
 
 	if (sess->enc_forced && !work->encrypted) {
@@ -8855,8 +8856,7 @@ bool smb2_is_sign_req(struct ksmbd_work *work, unsigned int command)
 
 	if ((rcv_hdr2->Flags & SMB2_FLAGS_SIGNED) &&
 	    command != SMB2_NEGOTIATE_HE &&
-	    command != SMB2_SESSION_SETUP_HE &&
-	    command != SMB2_OPLOCK_BREAK_HE)
+	    command != SMB2_SESSION_SETUP_HE)
 		return true;
 
 	return false;
