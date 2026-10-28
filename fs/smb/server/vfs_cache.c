@@ -961,18 +961,27 @@ int ksmbd_reopen_durable_fd(struct ksmbd_work *work, struct ksmbd_file *fp)
 	struct ksmbd_inode *ci;
 	struct oplock_info *op;
 
+	/*
+	 * Claim the handle under global_ft.lock so that concurrent reconnects
+	 * of the same durable handle cannot both attach it and insert it into
+	 * more than one session file table.
+	 */
+	write_lock(&global_ft.lock);
 	if (!fp->is_durable || fp->conn || fp->tcon) {
+		write_unlock(&global_ft.lock);
 		pr_err("Invalid durable fd [%p:%p]\n", fp->conn, fp->tcon);
 		return -EBADF;
 	}
 
 	if (has_file_id(fp->volatile_id)) {
+		write_unlock(&global_ft.lock);
 		pr_err("Still in use durable fd: %llu\n", fp->volatile_id);
 		return -EBADF;
 	}
 
 	fp->conn = work->conn;
 	fp->tcon = work->tcon;
+	write_unlock(&global_ft.lock);
 
 	ci = fp->f_ci;
 	down_write(&ci->m_lock);
@@ -987,8 +996,10 @@ int ksmbd_reopen_durable_fd(struct ksmbd_work *work, struct ksmbd_file *fp)
 	fp->f_state = FP_NEW;
 	__open_id(&work->sess->file_table, fp, OPEN_ID_TYPE_VOLATILE_ID);
 	if (!has_file_id(fp->volatile_id)) {
+		write_lock(&global_ft.lock);
 		fp->conn = NULL;
 		fp->tcon = NULL;
+		write_unlock(&global_ft.lock);
 		return -EBADF;
 	}
 	return 0;
