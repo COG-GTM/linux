@@ -440,6 +440,12 @@ static int handle_generic_event(struct sk_buff *skb, struct genl_info *info)
 	if (!info->attrs[type])
 		return -EINVAL;
 
+	if (info->snd_portid != READ_ONCE(ksmbd_tools_pid)) {
+		pr_err_ratelimited("Ignore IPC event %d from unregistered port %u\n",
+				   type, info->snd_portid);
+		return -EPERM;
+	}
+
 	payload = nla_data(info->attrs[info->genlhdr->cmd]);
 	sz = nla_len(info->attrs[info->genlhdr->cmd]);
 	return handle_response(type, payload, sz);
@@ -484,6 +490,14 @@ static int ipc_validate_msg(struct ipc_msg_table_entry *entry)
 	unsigned int msg_sz = entry->msg_sz;
 
 	switch (entry->type) {
+	case KSMBD_EVENT_LOGIN_REQUEST:
+	{
+		struct ksmbd_login_response *resp = entry->response;
+
+		if (resp->hash_sz > sizeof(resp->hash))
+			return -EINVAL;
+		break;
+	}
 	case KSMBD_EVENT_RPC_REQUEST:
 	{
 		struct ksmbd_rpc_command *resp = entry->response;
