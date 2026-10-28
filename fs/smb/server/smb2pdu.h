@@ -76,6 +76,7 @@ struct create_durable_req_v2 {
 } __packed;
 
 #define DURABLE_HANDLE_MAX_TIMEOUT	300000
+#define DURABLE_HANDLE_DEFAULT_TIMEOUT	60000
 
 struct create_durable_reconn_req {
 	struct create_context_hdr ccontext;
