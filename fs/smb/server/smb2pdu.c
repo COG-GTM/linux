@@ -2804,14 +2804,21 @@ static int parse_durable_handle_context(struct ksmbd_work *work,
 				if (!memcmp(conn->ClientGUID, dh_info->fp->client_guid,
 					    SMB2_CLIENT_GUID_SIZE)) {
 					if (!(req->hdr.Flags & SMB2_FLAGS_REPLAY_OPERATION)) {
+						ksmbd_put_durable_fd(dh_info->fp);
+						dh_info->fp = NULL;
 						err = -ENOEXEC;
 						goto out;
 					}
 
-					dh_info->fp->conn = conn;
+					/*
+					 * fp->conn is set by ksmbd_reopen_durable_fd(),
+					 * which only accepts disconnected durable opens.
+					 */
 					dh_info->reconnected = true;
 					goto out;
 				}
+				ksmbd_put_durable_fd(dh_info->fp);
+				dh_info->fp = NULL;
 			}
 
 			if ((lc && (lc->req_state & SMB2_LEASE_HANDLE_CACHING_LE)) ||
