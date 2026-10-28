@@ -2341,6 +2341,13 @@ out:
 	return err;
 }
 
+/* Wire size of one FILE_FULL_EA_INFORMATION entry: header, name, NUL, value */
+static unsigned int smb2_ea_entry_len(const struct smb2_ea_info *eabuf)
+{
+	return offsetof(struct smb2_ea_info, name) + eabuf->EaNameLength + 1 +
+	       le16_to_cpu(eabuf->EaValueLength);
+}
+
 /**
  * smb2_set_ea() - handler for setting extended attributes using set
  *		info command
@@ -2359,8 +2366,7 @@ static int smb2_set_ea(struct smb2_ea_info *eabuf, unsigned int buf_len,
 	int rc = 0;
 	unsigned int next = 0;
 
-	if (buf_len < sizeof(struct smb2_ea_info) + eabuf->EaNameLength +
-			le16_to_cpu(eabuf->EaValueLength))
+	if (buf_len < smb2_ea_entry_len(eabuf))
 		return -EINVAL;
 
 	attr_name = kmalloc(XATTR_NAME_MAX + 1, KSMBD_DEFAULT_GFP);
@@ -2429,6 +2435,10 @@ next:
 		next = le32_to_cpu(eabuf->NextEntryOffset);
 		if (next == 0 || buf_len < next)
 			break;
+		if (next < smb2_ea_entry_len(eabuf)) {
+			rc = -EINVAL;
+			break;
+		}
 		buf_len -= next;
 		eabuf = (struct smb2_ea_info *)((char *)eabuf + next);
 		if (buf_len < sizeof(struct smb2_ea_info)) {
@@ -2436,8 +2446,7 @@ next:
 			break;
 		}
 
-		if (buf_len < sizeof(struct smb2_ea_info) + eabuf->EaNameLength +
-				le16_to_cpu(eabuf->EaValueLength)) {
+		if (buf_len < smb2_ea_entry_len(eabuf)) {
 			rc = -EINVAL;
 			break;
 		}
