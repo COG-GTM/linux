@@ -159,11 +159,9 @@ static struct ksmbd_share_config *share_config_request(struct ksmbd_work *work,
 	INIT_LIST_HEAD(&share->veto_list);
 	share->name = kstrdup(name, KSMBD_DEFAULT_GFP);
 
-	if (!test_share_config_flag(share, KSMBD_SHARE_FLAG_PIPE)) {
-		int path_len = PATH_MAX;
-
-		if (resp->payload_sz)
-			path_len = resp->payload_sz - resp->veto_list_sz;
+	if (!test_share_config_flag(share, KSMBD_SHARE_FLAG_PIPE) &&
+	    resp->payload_sz) {
+		int path_len = resp->payload_sz - resp->veto_list_sz;
 
 		share->path = kstrndup(ksmbd_share_config_path(resp), path_len,
 				      KSMBD_DEFAULT_GFP);

@@ -113,12 +113,16 @@ static const struct nla_policy ksmbd_nl_policy[KSMBD_EVENT_MAX + 1] = {
 		.len = sizeof(struct ksmbd_logout_request),
 	},
 	[KSMBD_EVENT_RPC_REQUEST] = {
+		.len = sizeof(struct ksmbd_rpc_command),
 	},
 	[KSMBD_EVENT_RPC_RESPONSE] = {
+		.len = sizeof(struct ksmbd_rpc_command),
 	},
 	[KSMBD_EVENT_SPNEGO_AUTHEN_REQUEST] = {
+		.len = sizeof(struct ksmbd_spnego_authen_request),
 	},
 	[KSMBD_EVENT_SPNEGO_AUTHEN_RESPONSE] = {
+		.len = sizeof(struct ksmbd_spnego_authen_response),
 	},
 	[KSMBD_EVENT_LOGIN_REQUEST_EXT] = {
 		.len = sizeof(struct ksmbd_login_request),
@@ -263,17 +267,27 @@ static void ipc_msg_handle_free(int handle)
 
 static int handle_response(int type, void *payload, size_t sz)
 {
-	unsigned int handle = *(unsigned int *)payload;
+	unsigned int handle;
 	struct ipc_msg_table_entry *entry;
+	void *response;
 	int ret = 0;
 
+	if (sz < sizeof(handle))
+		return -EINVAL;
+
+	handle = *(unsigned int *)payload;
 	ipc_update_last_active();
-	down_read(&ipc_msg_table_lock);
+
+	response = kvzalloc(sz, KSMBD_DEFAULT_GFP);
+	if (!response)
+		return -ENOMEM;
+	memcpy(response, payload, sz);
+
+	down_write(&ipc_msg_table_lock);
 	hash_for_each_possible(ipc_msg_table, entry, ipc_table_hlist, handle) {
 		if (handle != entry->handle)
 			continue;
 
-		entry->response = NULL;
 		/*
 		 * Response message type value should be equal to
 		 * request message type + 1.
@@ -284,20 +298,22 @@ static int handle_response(int type, void *payload, size_t sz)
 			continue;
 		}
 
-		entry->response = kvzalloc(sz, KSMBD_DEFAULT_GFP);
-		if (!entry->response) {
-			ret = -ENOMEM;
+		if (entry->response) {
+			pr_err("Duplicate IPC response for handle %u. Ignore.\n",
+			       handle);
+			ret = -EINVAL;
 			break;
 		}
 
-		memcpy(entry->response, payload, sz);
 		entry->msg_sz = sz;
+		entry->response = response;
+		response = NULL;
 		wake_up_interruptible(&entry->wait);
-		ret = 0;
 		break;
 	}
-	up_read(&ipc_msg_table_lock);
+	up_write(&ipc_msg_table_lock);
 
+	kvfree(response);
 	return ret;
 }
 
@@ -488,42 +504,51 @@ static int ipc_validate_msg(struct ipc_msg_table_entry *entry)
 	{
 		struct ksmbd_rpc_command *resp = entry->response;
 
-		msg_sz = sizeof(struct ksmbd_rpc_command) + resp->payload_sz;
+		if (msg_sz < sizeof(*resp) ||
+		    resp->payload_sz != msg_sz - sizeof(*resp))
+			return -EINVAL;
 		break;
 	}
 	case KSMBD_EVENT_SPNEGO_AUTHEN_REQUEST:
 	{
 		struct ksmbd_spnego_authen_response *resp = entry->response;
 
-		msg_sz = sizeof(struct ksmbd_spnego_authen_response) +
-				resp->session_key_len + resp->spnego_blob_len;
+		if (msg_sz < sizeof(*resp) ||
+		    (size_t)resp->session_key_len + resp->spnego_blob_len !=
+		    msg_sz - sizeof(*resp))
+			return -EINVAL;
 		break;
 	}
 	case KSMBD_EVENT_SHARE_CONFIG_REQUEST:
 	{
 		struct ksmbd_share_config_response *resp = entry->response;
 
-		if (resp->payload_sz) {
-			if (resp->payload_sz < resp->veto_list_sz)
-				return -EINVAL;
+		if (msg_sz < sizeof(*resp) ||
+		    resp->payload_sz < resp->veto_list_sz)
+			return -EINVAL;
 
-			msg_sz = sizeof(struct ksmbd_share_config_response) +
-					resp->payload_sz;
-		}
+		if (resp->payload_sz &&
+		    resp->payload_sz != msg_sz - sizeof(*resp))
+			return -EINVAL;
 		break;
 	}
 	case KSMBD_EVENT_LOGIN_REQUEST_EXT:
 	{
 		struct ksmbd_login_response_ext *resp = entry->response;
 
-		if (resp->ngroups) {
-			msg_sz = sizeof(struct ksmbd_login_response_ext) +
-					resp->ngroups * sizeof(gid_t);
-		}
+		if (msg_sz < sizeof(*resp) ||
+		    resp->ngroups < 0 || resp->ngroups > NGROUPS_MAX)
+			return -EINVAL;
+
+		if (resp->ngroups &&
+		    (size_t)resp->ngroups * sizeof(gid_t) !=
+		    msg_sz - sizeof(*resp))
+			return -EINVAL;
+		break;
 	}
 	}
 
-	return entry->msg_sz != msg_sz ? -EINVAL : 0;
+	return 0;
 }
 
 static void *ipc_msg_send_request(struct ksmbd_ipc_msg *msg, unsigned int handle)
@@ -536,6 +561,7 @@ static void *ipc_msg_send_request(struct ksmbd_ipc_msg *msg, unsigned int handle
 
 	entry.type = msg->type;
 	entry.response = NULL;
+	entry.msg_sz = 0;
 	init_waitqueue_head(&entry.wait);
 
 	down_write(&ipc_msg_table_lock);
@@ -544,23 +570,23 @@ static void *ipc_msg_send_request(struct ksmbd_ipc_msg *msg, unsigned int handle
 	up_write(&ipc_msg_table_lock);
 
 	ret = ipc_msg_send(msg);
-	if (ret)
-		goto out;
+	if (!ret)
+		wait_event_interruptible_timeout(entry.wait,
+						 READ_ONCE(entry.response) != NULL,
+						 IPC_WAIT_TIMEOUT);
 
-	ret = wait_event_interruptible_timeout(entry.wait,
-					       entry.response != NULL,
-					       IPC_WAIT_TIMEOUT);
-	if (entry.response) {
-		ret = ipc_validate_msg(&entry);
-		if (ret) {
-			kvfree(entry.response);
-			entry.response = NULL;
-		}
-	}
-out:
+	/*
+	 * Unhash the entry before looking at the response so that
+	 * handle_response() can no longer replace it under us.
+	 */
 	down_write(&ipc_msg_table_lock);
 	hash_del(&entry.ipc_table_hlist);
 	up_write(&ipc_msg_table_lock);
+
+	if (entry.response && ipc_validate_msg(&entry)) {
+		kvfree(entry.response);
+		entry.response = NULL;
+	}
 	return entry.response;
 }
 
