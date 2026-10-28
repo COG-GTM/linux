@@ -1221,7 +1221,11 @@ int ksmbd_vfs_kern_path_locked(struct ksmbd_work *work, char *name,
 	if (!err)
 		return 0;
 
-	if (caseless) {
+	/*
+	 * Only retry caselessly when the name was simply not found. Any other
+	 * error, e.g. -EXDEV for a name that escapes the share, is final.
+	 */
+	if (caseless && err == -ENOENT) {
 		char *filepath;
 		size_t path_len, remain_len;
 
@@ -1303,15 +1307,26 @@ struct dentry *ksmbd_vfs_kern_path_create(struct ksmbd_work *work,
 					  unsigned int flags,
 					  struct path *path)
 {
+	struct ksmbd_share_config *share_conf = work->tcon->share_conf;
 	char *abs_name;
 	struct dentry *dent;
 
-	abs_name = convert_to_unix_name(work->tcon->share_conf, name);
+	abs_name = convert_to_unix_name(share_conf, name);
 	if (!abs_name)
 		return ERR_PTR(-ENOMEM);
 
 	dent = kern_path_create(AT_FDCWD, abs_name, path, flags);
 	kfree(abs_name);
+	if (IS_ERR(dent))
+		return dent;
+
+	/* Refuse to create anything whose parent is outside the share. */
+	if (!path_is_under(path, &share_conf->vfs_path)) {
+		pr_err_ratelimited("create outside share %s refused\n",
+				   share_conf->name);
+		done_path_create(path, dent);
+		return ERR_PTR(-EACCES);
+	}
 	return dent;
 }
 
