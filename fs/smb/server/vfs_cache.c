@@ -936,32 +936,44 @@ void ksmbd_free_global_file_table(void)
 int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
 				  struct ksmbd_file *fp, char *name)
 {
-	char *pathname, *ab_pathname, *rel;
+	char *pathname, *ab_pathname, *sharename, *ab_sharename, *rel;
+	size_t share_len;
 	int ret = 0;
+
+	if (!share->path)
+		return -EINVAL;
 
 	pathname = kmalloc(PATH_MAX, KSMBD_DEFAULT_GFP);
 	if (!pathname)
 		return -EACCES;
 
-	ab_pathname = d_path(&fp->filp->f_path, pathname, PATH_MAX);
-	if (IS_ERR(ab_pathname)) {
+	sharename = kmalloc(PATH_MAX, KSMBD_DEFAULT_GFP);
+	if (!sharename) {
 		kfree(pathname);
 		return -EACCES;
 	}
 
-	if (!share->path || !share->path_sz ||
-	    strncmp(ab_pathname, share->path, share->path_sz))
+	ab_pathname = d_path(&fp->filp->f_path, pathname, PATH_MAX);
+	ab_sharename = d_path(&share->vfs_path, sharename, PATH_MAX);
+	if (IS_ERR(ab_pathname) || IS_ERR(ab_sharename)) {
+		ret = -EACCES;
+		goto out;
+	}
+
+	/* the open must live under the (resolved) root of this share */
+	share_len = strlen(ab_sharename);
+	if (strncmp(ab_pathname, ab_sharename, share_len))
 		goto outside_share;
 
-	rel = ab_pathname + share->path_sz;
-	if (share->path[share->path_sz - 1] != '/') {
+	rel = ab_pathname + share_len;
+	if (share_len && ab_sharename[share_len - 1] != '/') {
 		if (*rel != '/' && *rel != '\0')
 			goto outside_share;
 		if (*rel == '/')
 			rel++;
 	}
 
-	if (name && strcmp(rel, name)) {
+	if (name && strcasecmp(rel, name)) {
 		ksmbd_debug(SMB, "invalid name reconnect %s\n", name);
 		ret = -EINVAL;
 	}
@@ -971,6 +983,7 @@ outside_share:
 	ksmbd_debug(SMB, "durable fd is outside of share %s\n", share->name);
 	ret = -EINVAL;
 out:
+	kfree(sharename);
 	kfree(pathname);
 
 	return ret;
