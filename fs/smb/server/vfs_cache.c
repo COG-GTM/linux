@@ -1005,12 +1005,49 @@ int ksmbd_init_file_table(struct ksmbd_file_table *ft)
 	return 0;
 }
 
+/*
+ * Files still referenced by an in-flight request are skipped by
+ * __close_file_table_ids(). Detach them from the table before its idr is
+ * freed so that the final ksmbd_fd_put() does not touch the freed idr.
+ */
+static void __detach_file_table_ids(struct ksmbd_file_table *ft)
+{
+	struct ksmbd_file *fp;
+	unsigned int id = 0;
+
+	while (1) {
+		write_lock(&ft->lock);
+		fp = idr_get_next(ft->idr, &id);
+		if (!fp) {
+			write_unlock(&ft->lock);
+			break;
+		}
+
+		idr_remove(ft->idr, id);
+		if (!has_file_id(fp->volatile_id)) {
+			id++;
+			write_unlock(&ft->lock);
+			continue;
+		}
+
+		fp->volatile_id = KSMBD_NO_FID;
+		write_unlock(&ft->lock);
+
+		down_write(&fp->f_ci->m_lock);
+		list_del_init(&fp->node);
+		up_write(&fp->f_ci->m_lock);
+
+		id++;
+	}
+}
+
 void ksmbd_destroy_file_table(struct ksmbd_file_table *ft)
 {
 	if (!ft->idr)
 		return;
 
 	__close_file_table_ids(ft, NULL, session_fd_check);
+	__detach_file_table_ids(ft);
 	idr_destroy(ft->idr);
 	kfree(ft->idr);
 	ft->idr = NULL;
