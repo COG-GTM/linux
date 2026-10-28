@@ -365,6 +365,9 @@ void destroy_previous_session(struct ksmbd_conn *conn,
 	struct ksmbd_user *prev_user;
 	int err;
 
+	if (!user || user_guest(user))
+		return;
+
 	down_write(&sessions_table_lock);
 	down_write(&conn->session_lock);
 	prev_sess = __session_lookup(id);
