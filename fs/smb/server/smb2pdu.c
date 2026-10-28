@@ -4340,7 +4340,8 @@ static int smb2_resp_buf_len(struct ksmbd_work *work, unsigned short hdr2_len)
 	int free_len;
 
 	free_len = (int)(work->response_sz -
-		(get_rfc1002_len(work->response_buf) + 4)) - hdr2_len;
+		(get_rfc1002_len(work->response_buf) + 4)) -
+		(int)sizeof(struct smb2_hdr) - hdr2_len;
 	return free_len;
 }
 
