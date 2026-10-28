@@ -4622,7 +4622,10 @@ static int smb2_get_info_file_pipe(struct ksmbd_session *sess,
 	 * pipe without opening it, checking error condition here
 	 */
 	id = req->VolatileFileId;
-	if (!ksmbd_session_rpc_method(sess, id))
+	down_read(&sess->rpc_lock);
+	rc = ksmbd_session_rpc_method(sess, id);
+	up_read(&sess->rpc_lock);
+	if (!rc)
 		return -ENOENT;
 
 	ksmbd_debug(SMB, "FileInfoClass %u, FileId 0x%llx\n",
