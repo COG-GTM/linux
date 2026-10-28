@@ -1801,13 +1801,24 @@ int smb2_check_durable_oplock(struct ksmbd_conn *conn,
 			      struct ksmbd_share_config *share,
 			      struct ksmbd_file *fp,
 			      struct lease_ctx_info *lctx,
-			      char *name)
+			      char *name, bool posix)
 {
 	struct oplock_info *opinfo = opinfo_get(fp);
 	int ret = 0;
 
+	/*
+	 * A durable handle may only be reclaimed by the client that opened
+	 * it, so check the client GUID for batch oplock handles as well as
+	 * for leases.
+	 */
+	if (memcmp(conn->ClientGUID, fp->client_guid, SMB2_CLIENT_GUID_SIZE)) {
+		ksmbd_debug(SMB, "Client guid of fp is not equal to the one of connection\n");
+		ret = -EBADF;
+		goto out;
+	}
+
 	if (!opinfo)
-		return 0;
+		goto validate_name;
 
 	if (opinfo->is_lease == false) {
 		if (lctx) {
@@ -1819,16 +1830,10 @@ int smb2_check_durable_oplock(struct ksmbd_conn *conn,
 		if (opinfo->level != SMB2_OPLOCK_LEVEL_BATCH) {
 			pr_err("oplock level is not equal to SMB2_OPLOCK_LEVEL_BATCH\n");
 			ret = -EBADF;
+			goto out;
 		}
 
-		goto out;
-	}
-
-	if (memcmp(conn->ClientGUID, fp->client_guid,
-				SMB2_CLIENT_GUID_SIZE)) {
-		ksmbd_debug(SMB, "Client guid of fp is not equal to the one of connection\n");
-		ret = -EBADF;
-		goto out;
+		goto validate_name;
 	}
 
 	if (!lctx) {
@@ -1858,8 +1863,9 @@ int smb2_check_durable_oplock(struct ksmbd_conn *conn,
 		goto out;
 	}
 
+validate_name:
 	if (!ksmbd_inode_pending_delete(fp))
-		ret = ksmbd_validate_name_reconnect(share, fp, name);
+		ret = ksmbd_validate_name_reconnect(share, fp, name, posix);
 out:
 	opinfo_put(opinfo);
 	return ret;
