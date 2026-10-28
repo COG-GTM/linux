@@ -44,6 +44,7 @@ struct ksmbd_session {
 	bool				is_anonymous;
 
 	int				state;
+	bool				destroying;
 	__u8				*Preauth_HashValue;
 
 	char				sess_key[CIFS_KEY_SIZE];
@@ -96,6 +97,8 @@ void ksmbd_sessions_deregister(struct ksmbd_conn *conn);
 struct ksmbd_session *__session_lookup(unsigned long long id);
 struct ksmbd_session *ksmbd_session_lookup_all(struct ksmbd_conn *conn,
 					       unsigned long long id);
+int ksmbd_session_add_channel(struct ksmbd_conn *conn,
+			       struct ksmbd_session *sess);
 void destroy_previous_session(struct ksmbd_conn *conn,
 			      struct ksmbd_user *user, u64 id);
 struct preauth_session *ksmbd_preauth_session_alloc(struct ksmbd_conn *conn,
