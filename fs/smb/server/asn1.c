@@ -217,6 +217,8 @@ static int ksmbd_neg_token_alloc(void *context, size_t hdrlen,
 	if (!vlen)
 		return -EINVAL;
 
+	kfree(conn->mechToken);
+	conn->mechTokenLen = 0;
 	conn->mechToken = kmemdup_nul(value, vlen, KSMBD_DEFAULT_GFP);
 	if (!conn->mechToken)
 		return -ENOMEM;

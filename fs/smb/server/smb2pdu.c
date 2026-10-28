@@ -1326,7 +1326,15 @@ static int decode_negotiation_token(struct ksmbd_conn *conn,
 		return -EINVAL;
 
 	if (ksmbd_decode_negTokenInit((char *)negblob, sz, conn)) {
+		/* A partial negTokenInit decode may have allocated mechToken */
+		kfree(conn->mechToken);
+		conn->mechToken = NULL;
+		conn->mechTokenLen = 0;
+
 		if (ksmbd_decode_negTokenTarg((char *)negblob, sz, conn)) {
+			kfree(conn->mechToken);
+			conn->mechToken = NULL;
+			conn->mechTokenLen = 0;
 			conn->auth_mechs |= KSMBD_AUTH_NTLMSSP;
 			conn->preferred_auth_mech = KSMBD_AUTH_NTLMSSP;
 			conn->use_spnego = false;
@@ -1894,10 +1902,9 @@ out_err:
 	else if (rc)
 		rsp->hdr.Status = STATUS_LOGON_FAILURE;
 
-	if (conn->use_spnego && conn->mechToken) {
-		kfree(conn->mechToken);
-		conn->mechToken = NULL;
-	}
+	kfree(conn->mechToken);
+	conn->mechToken = NULL;
+	conn->mechTokenLen = 0;
 
 	if (rc < 0) {
 		/*
