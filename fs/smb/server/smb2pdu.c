@@ -1623,8 +1623,10 @@ static int krb5_authenticate(struct ksmbd_work *work,
 
 	rsp->SecurityBufferLength = cpu_to_le16(out_len);
 
-	if ((conn->sign || server_conf.enforced_signing) ||
-	    (req->SecurityMode & SMB2_NEGOTIATE_SIGNING_REQUIRED))
+	/* binding keeps an encrypted session's existing keys and !sign */
+	if (((conn->sign || server_conf.enforced_signing) ||
+	     (req->SecurityMode & SMB2_NEGOTIATE_SIGNING_REQUIRED)) &&
+	    !(conn->binding && sess->enc))
 		sess->sign = true;
 
 	if (smb3_encryption_negotiated(conn) && !conn->binding) {
