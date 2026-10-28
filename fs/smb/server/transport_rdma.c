@@ -526,6 +526,8 @@ static int smb_direct_check_recvmsg(struct smb_direct_recvmsg *recvmsg)
 		    le16_to_cpu(req->max_version) < 0x0100)
 			return -EOPNOTSUPP;
 		if (le16_to_cpu(req->credits_requested) <= 0 ||
+		    le32_to_cpu(req->preferred_send_size) <
+			sizeof(struct smb_direct_data_transfer) ||
 		    le32_to_cpu(req->max_receive_size) <= 128 ||
 		    le32_to_cpu(req->max_fragmented_size) <=
 					128 * 1024)
@@ -648,6 +650,10 @@ static int smb_direct_post_recv(struct smb_direct_transport *t,
 {
 	struct ib_recv_wr wr;
 	int ret;
+
+	if (t->max_recv_size <= 0 ||
+	    t->max_recv_size > smb_direct_max_receive_size)
+		return -EINVAL;
 
 	recvmsg->sge.addr = ib_dma_map_single(t->cm_id->device,
 					      recvmsg->packet, t->max_recv_size,
@@ -1983,12 +1989,12 @@ static int smb_direct_prepare(struct ksmbd_transport *t)
 		goto out;
 
 	req = (struct smb_direct_negotiate_req *)recvmsg->packet;
-	st->max_recv_size = min_t(int, st->max_recv_size,
+	st->max_recv_size = min_t(u32, st->max_recv_size,
 				  le32_to_cpu(req->preferred_send_size));
-	st->max_send_size = min_t(int, st->max_send_size,
+	st->max_send_size = min_t(u32, st->max_send_size,
 				  le32_to_cpu(req->max_receive_size));
 	st->max_fragmented_send_size =
-		le32_to_cpu(req->max_fragmented_size);
+		min_t(u32, le32_to_cpu(req->max_fragmented_size), INT_MAX);
 	st->max_fragmented_recv_size =
 		(st->recv_credit_max * st->max_recv_size) / 2;
 
