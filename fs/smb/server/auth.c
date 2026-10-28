@@ -508,7 +508,8 @@ ksmbd_build_ntlmssp_challenge_blob(struct challenge_message *chgblob,
 }
 
 #ifdef CONFIG_SMB_SERVER_KERBEROS5
-int ksmbd_krb5_authenticate(struct ksmbd_session *sess, char *in_blob,
+int ksmbd_krb5_authenticate(struct ksmbd_conn *conn,
+			    struct ksmbd_session *sess, char *in_blob,
 			    int in_len, char *out_blob, int *out_len)
 {
 	struct ksmbd_spnego_authen_response *resp;
@@ -564,7 +565,10 @@ int ksmbd_krb5_authenticate(struct ksmbd_session *sess, char *in_blob,
 		ksmbd_free_user(user);
 	}
 
-	memcpy(sess->sess_key, resp->payload, resp->session_key_len);
+	/* A binding request must keep the session key of the existing session */
+	if (!conn->binding)
+		memcpy(sess->sess_key, resp->payload,
+		       resp->session_key_len);
 	memcpy(out_blob, resp->payload + resp->session_key_len,
 	       resp->spnego_blob_len);
 	*out_len = resp->spnego_blob_len;
@@ -574,7 +578,8 @@ out:
 	return retval;
 }
 #else
-int ksmbd_krb5_authenticate(struct ksmbd_session *sess, char *in_blob,
+int ksmbd_krb5_authenticate(struct ksmbd_conn *conn,
+			    struct ksmbd_session *sess, char *in_blob,
 			    int in_len, char *out_blob, int *out_len)
 {
 	return -EOPNOTSUPP;
