@@ -917,6 +917,9 @@ int ksmbd_gen_smb311_encryptionkey(struct ksmbd_conn *conn,
 	struct derivation_twin twin;
 	struct derivation *d;
 
+	if (!sess->Preauth_HashValue)
+		return -EINVAL;
+
 	d = &twin.encryption;
 	d->label.iov_base = "SMBS2CCipherKey";
 	d->label.iov_len = 16;
