@@ -72,3 +72,15 @@ config SMB_SERVER_KERBEROS5
 	bool "Support for Kerberos 5"
 	depends on SMB_SERVER
 	default y
+
+config SMB_SERVER_KUNIT_TEST
+	bool "KUnit tests for ksmbd" if !KUNIT_ALL_TESTS
+	depends on SMB_SERVER && KUNIT=y
+	default KUNIT_ALL_TESTS
+	help
+	  This builds KUnit tests for the ksmbd IPC request handle
+	  allocation. They check that a handle released after a request
+	  timed out is not handed to the next request, and that a late
+	  daemon response is not delivered to a newer request.
+
+	  If unsure, say N.
