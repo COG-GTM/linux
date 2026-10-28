@@ -659,7 +659,8 @@ static int
 __close_file_table_ids(struct ksmbd_file_table *ft,
 		       struct ksmbd_tree_connect *tcon,
 		       bool (*skip)(struct ksmbd_tree_connect *tcon,
-				    struct ksmbd_file *fp))
+				    struct ksmbd_file *fp),
+		       void (*detach)(struct ksmbd_file *fp))
 {
 	struct ksmbd_file *fp;
 	unsigned int id = 0;
@@ -673,15 +674,34 @@ __close_file_table_ids(struct ksmbd_file_table *ft,
 			break;
 		}
 
-		if (skip(tcon, fp) ||
-		    !atomic_dec_and_test(&fp->refcount)) {
+		if (skip(tcon, fp)) {
+			if (!detach || !atomic_inc_not_zero(&fp->refcount)) {
+				id++;
+				write_unlock(&ft->lock);
+				continue;
+			}
+
+			/*
+			 * detach() takes sleeping locks, so it must run
+			 * without ft->lock held. The extra reference keeps fp
+			 * alive and away from the durable scavenger meanwhile.
+			 */
+			write_unlock(&ft->lock);
+			detach(fp);
+			if (!atomic_dec_and_test(&fp->refcount)) {
+				id++;
+				continue;
+			}
+			write_lock(&ft->lock);
+		} else if (!atomic_dec_and_test(&fp->refcount)) {
 			id++;
 			write_unlock(&ft->lock);
 			continue;
 		}
 
 		set_close_state_blocked_works(fp);
-		idr_remove(ft->idr, fp->volatile_id);
+		if (idr_find(ft->idr, id) == fp)
+			idr_remove(ft->idr, id);
 		fp->volatile_id = KSMBD_NO_FID;
 		write_unlock(&ft->lock);
 
@@ -860,15 +880,19 @@ void ksmbd_stop_durable_scavenger(void)
 	kthread_stop(server_conf.dh_task);
 }
 
+/* Called with ft->lock held, must not sleep. */
 static bool session_fd_check(struct ksmbd_tree_connect *tcon,
 			     struct ksmbd_file *fp)
+{
+	return is_reconnectable(fp);
+}
+
+/* Called without ft->lock, keeps a reconnectable fp for durable reopen. */
+static void session_fd_detach(struct ksmbd_file *fp)
 {
 	struct ksmbd_inode *ci;
 	struct oplock_info *op;
 	struct ksmbd_conn *conn;
-
-	if (!is_reconnectable(fp))
-		return false;
 
 	conn = fp->conn;
 	ci = fp->f_ci;
@@ -889,15 +913,13 @@ static bool session_fd_check(struct ksmbd_tree_connect *tcon,
 	if (fp->durable_timeout)
 		fp->durable_scavenger_timeout =
 			jiffies_to_msecs(jiffies) + fp->durable_timeout;
-
-	return true;
 }
 
 void ksmbd_close_tree_conn_fds(struct ksmbd_work *work)
 {
 	int num = __close_file_table_ids(&work->sess->file_table,
 					 work->tcon,
-					 tree_conn_fd_check);
+					 tree_conn_fd_check, NULL);
 
 	atomic_sub(num, &work->conn->stats.open_files_count);
 }
@@ -906,7 +928,7 @@ void ksmbd_close_session_fds(struct ksmbd_work *work)
 {
 	int num = __close_file_table_ids(&work->sess->file_table,
 					 work->tcon,
-					 session_fd_check);
+					 session_fd_check, session_fd_detach);
 
 	atomic_sub(num, &work->conn->stats.open_files_count);
 }
@@ -1010,7 +1032,7 @@ void ksmbd_destroy_file_table(struct ksmbd_file_table *ft)
 	if (!ft->idr)
 		return;
 
-	__close_file_table_ids(ft, NULL, session_fd_check);
+	__close_file_table_ids(ft, NULL, session_fd_check, session_fd_detach);
 	idr_destroy(ft->idr);
 	kfree(ft->idr);
 	ft->idr = NULL;
