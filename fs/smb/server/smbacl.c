@@ -113,6 +113,16 @@ int compare_sids(const struct smb_sid *ctsid, const struct smb_sid *cwsid)
 	return 0; /* sids compare/match */
 }
 
+/*
+ * An NFS mode SID is S-1-5-88-3-<mode>: exactly one sub-authority more
+ * than sid_unix_NFS_mode, carrying the mode bits in sub_auth[2].
+ */
+static bool is_unix_NFS_mode_sid(const struct smb_sid *sid)
+{
+	return sid->num_subauth == sid_unix_NFS_mode.num_subauth + 1 &&
+	       !compare_sids(sid, &sid_unix_NFS_mode);
+}
+
 static void smb_copy_sid(struct smb_sid *dst, const struct smb_sid *src)
 {
 	int i;
@@ -451,7 +461,7 @@ static void parse_dacl(struct mnt_idmap *idmap,
 		ppace[i]->access_req =
 			smb_map_generic_desired_access(ppace[i]->access_req);
 
-		if (!(compare_sids(&ppace[i]->sid, &sid_unix_NFS_mode))) {
+		if (is_unix_NFS_mode_sid(&ppace[i]->sid)) {
 			fattr->cf_mode =
 				le32_to_cpu(ppace[i]->sid.sub_auth[2]);
 			break;
@@ -1327,7 +1337,7 @@ int smb_check_perm_dacl(struct ksmbd_conn *conn, const struct path *path,
 		aces_size -= ace_size;
 
 		if (!compare_sids(&sid, &ace->sid) ||
-		    !compare_sids(&sid_unix_NFS_mode, &ace->sid)) {
+		    is_unix_NFS_mode_sid(&ace->sid)) {
 			found = 1;
 			break;
 		}
