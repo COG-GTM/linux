@@ -580,7 +580,7 @@ static void recv_done(struct ib_cq *cq, struct ib_wc *wc)
 	case SMB_DIRECT_MSG_DATA_TRANSFER: {
 		struct smb_direct_data_transfer *data_transfer =
 			(struct smb_direct_data_transfer *)recvmsg->packet;
-		unsigned int data_length;
+		u32 data_length, remaining_data_length, data_offset;
 		int avail_recvmsg_count, receive_credits;
 
 		if (wc->byte_len <
@@ -590,17 +590,32 @@ static void recv_done(struct ib_cq *cq, struct ib_wc *wc)
 		}
 
 		data_length = le32_to_cpu(data_transfer->data_length);
+		remaining_data_length =
+			le32_to_cpu(data_transfer->remaining_data_length);
+		data_offset = le32_to_cpu(data_transfer->data_offset);
 		if (data_length) {
-			if (wc->byte_len < sizeof(struct smb_direct_data_transfer) +
-			    (u64)data_length) {
+			if (data_offset <
+			    offsetof(struct smb_direct_data_transfer, buffer) ||
+			    !IS_ALIGNED(data_offset, 8) ||
+			    (u64)data_offset + data_length > wc->byte_len) {
 				put_empty_recvmsg(t, recvmsg);
+				smb_direct_disconnect_rdma_connection(t);
+				return;
+			}
+
+			if (remaining_data_length > t->max_fragmented_recv_size ||
+			    data_length > t->max_fragmented_recv_size ||
+			    (u64)remaining_data_length + data_length >
+			    (u64)t->max_fragmented_recv_size) {
+				put_empty_recvmsg(t, recvmsg);
+				smb_direct_disconnect_rdma_connection(t);
 				return;
 			}
 
 			if (t->full_packet_received)
 				recvmsg->first_segment = true;
 
-			if (le32_to_cpu(data_transfer->remaining_data_length))
+			if (remaining_data_length)
 				t->full_packet_received = false;
 			else
 				t->full_packet_received = true;
