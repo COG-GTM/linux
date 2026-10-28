@@ -11,6 +11,7 @@
 #include "server.h"
 #include "smb_common.h"
 #include "mgmt/ksmbd_ida.h"
+#include "mgmt/user_session.h"
 #include "connection.h"
 #include "transport_tcp.h"
 #include "transport_rdma.h"
@@ -160,13 +161,20 @@ void ksmbd_conn_unlock(struct ksmbd_conn *conn)
 	mutex_unlock(&conn->srv_mutex);
 }
 
-void ksmbd_all_conn_set_status(u64 sess_id, u32 status)
+static bool ksmbd_conn_has_sess(struct ksmbd_conn *conn,
+				struct ksmbd_session *sess)
+{
+	return xa_load(&conn->sessions, sess->id) ||
+	       xa_load(&sess->ksmbd_chann_list, (long)conn);
+}
+
+void ksmbd_all_conn_set_status(struct ksmbd_session *sess, u32 status)
 {
 	struct ksmbd_conn *conn;
 
 	down_read(&conn_list_lock);
 	list_for_each_entry(conn, &conn_list, conns_list) {
-		if (conn->binding || xa_load(&conn->sessions, sess_id))
+		if (ksmbd_conn_has_sess(conn, sess))
 			WRITE_ONCE(conn->status, status);
 	}
 	up_read(&conn_list_lock);
@@ -177,11 +185,12 @@ void ksmbd_conn_wait_idle(struct ksmbd_conn *conn)
 	wait_event(conn->req_running_q, atomic_read(&conn->req_running) < 2);
 }
 
-int ksmbd_conn_wait_idle_sess_id(struct ksmbd_conn *curr_conn, u64 sess_id)
+int ksmbd_conn_wait_idle_sess_id(struct ksmbd_conn *curr_conn,
+				 struct ksmbd_session *sess)
 {
 	struct ksmbd_conn *conn;
 	int rc, retry_count = 0, max_timeout = 120;
-	int rcount = 1;
+	int rcount;
 
 retry_idle:
 	if (retry_count >= max_timeout)
@@ -189,9 +198,8 @@ retry_idle:
 
 	down_read(&conn_list_lock);
 	list_for_each_entry(conn, &conn_list, conns_list) {
-		if (conn->binding || xa_load(&conn->sessions, sess_id)) {
-			if (conn == curr_conn)
-				rcount = 2;
+		if (ksmbd_conn_has_sess(conn, sess)) {
+			rcount = conn == curr_conn ? 2 : 1;
 			if (atomic_read(&conn->req_running) >= rcount) {
 				rc = wait_event_timeout(conn->req_running_q,
 					atomic_read(&conn->req_running) < rcount,

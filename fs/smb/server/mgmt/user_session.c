@@ -378,17 +378,34 @@ void destroy_previous_session(struct ksmbd_conn *conn,
 	    memcmp(user->passkey, prev_user->passkey, user->passkey_sz))
 		goto out;
 
-	ksmbd_all_conn_set_status(id, KSMBD_SESS_NEED_RECONNECT);
-	err = ksmbd_conn_wait_idle_sess_id(conn, id);
+	ksmbd_user_session_get(prev_sess);
+	ksmbd_all_conn_set_status(prev_sess, KSMBD_SESS_NEED_RECONNECT);
+	up_write(&conn->session_lock);
+	up_write(&sessions_table_lock);
+
+	/* Don't block other session setups while the old channels drain */
+	err = ksmbd_conn_wait_idle_sess_id(conn, prev_sess);
+
+	down_write(&sessions_table_lock);
+	down_write(&conn->session_lock);
 	if (err) {
-		ksmbd_all_conn_set_status(id, KSMBD_SESS_NEED_SETUP);
-		goto out;
+		ksmbd_all_conn_set_status(prev_sess, KSMBD_SESS_NEED_SETUP);
+		goto out_put;
 	}
+
+	if (prev_sess->state == SMB2_SESSION_EXPIRED ||
+	    __session_lookup(id) != prev_sess)
+		goto out_put;
 
 	ksmbd_destroy_file_table(&prev_sess->file_table);
 	prev_sess->state = SMB2_SESSION_EXPIRED;
-	ksmbd_all_conn_set_status(id, KSMBD_SESS_NEED_SETUP);
+	ksmbd_all_conn_set_status(prev_sess, KSMBD_SESS_NEED_SETUP);
 	ksmbd_launch_ksmbd_durable_scavenger();
+out_put:
+	up_write(&conn->session_lock);
+	up_write(&sessions_table_lock);
+	ksmbd_user_session_put(prev_sess);
+	return;
 out:
 	up_write(&conn->session_lock);
 	up_write(&sessions_table_lock);
