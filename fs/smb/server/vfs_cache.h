@@ -104,6 +104,11 @@ struct ksmbd_file {
 	unsigned int			durable_timeout;
 	unsigned int			durable_scavenger_timeout;
 
+	/* identity of the open's creator, checked on durable reconnect */
+	unsigned int			owner_uid;
+	char				*owner_name;
+	char				*owner_share;
+
 	/* if ls is happening on directory, below is valid*/
 	struct ksmbd_readdir_data	readdir_data;
 	int				dot_dotdot[2];
@@ -183,6 +188,7 @@ void ksmbd_set_inode_pending_delete(struct ksmbd_file *fp);
 void ksmbd_clear_inode_pending_delete(struct ksmbd_file *fp);
 void ksmbd_fd_set_delete_on_close(struct ksmbd_file *fp,
 				  int file_info);
+int ksmbd_set_durable_owner(struct ksmbd_work *work, struct ksmbd_file *fp);
 int ksmbd_reopen_durable_fd(struct ksmbd_work *work, struct ksmbd_file *fp);
 int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
 				  struct ksmbd_file *fp, char *name);

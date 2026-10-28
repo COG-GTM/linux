@@ -18,6 +18,7 @@
 #include "connection.h"
 #include "mgmt/tree_connect.h"
 #include "mgmt/user_session.h"
+#include "mgmt/user_config.h"
 #include "smb_common.h"
 #include "server.h"
 
@@ -345,6 +346,8 @@ static void __ksmbd_close_fd(struct ksmbd_file_table *ft, struct ksmbd_file *fp)
 
 	if (ksmbd_stream_fd(fp))
 		kfree(fp->stream.name);
+	kfree(fp->owner_name);
+	kfree(fp->owner_share);
 	kmem_cache_free(filp_cache, fp);
 }
 
@@ -492,9 +495,9 @@ struct ksmbd_file *ksmbd_lookup_durable_fd(unsigned long long id)
 
 	fp = __ksmbd_lookup_fd(&global_ft, id);
 	if (fp && (fp->conn ||
-		   (fp->durable_scavenger_timeout &&
-		    (fp->durable_scavenger_timeout <
-		     jiffies_to_msecs(jiffies))))) {
+		   (fp->durable_timeout &&
+		    (int)(jiffies_to_msecs(jiffies) -
+			  fp->durable_scavenger_timeout) > 0))) {
 		ksmbd_put_durable_fd(fp);
 		fp = NULL;
 	}
@@ -791,8 +794,8 @@ static int ksmbd_durable_scavenger(void *dummy)
 				continue;
 
 			found_fp_timeout = true;
-			if (fp->durable_scavenger_timeout <=
-			    jiffies_to_msecs(jiffies)) {
+			if ((int)(jiffies_to_msecs(jiffies) -
+				  fp->durable_scavenger_timeout) >= 0) {
 				__ksmbd_remove_durable_fd(fp);
 				list_add(&fp->node, &scavenger_list);
 			} else {
@@ -933,7 +936,7 @@ void ksmbd_free_global_file_table(void)
 int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
 				  struct ksmbd_file *fp, char *name)
 {
-	char *pathname, *ab_pathname;
+	char *pathname, *ab_pathname, *rel;
 	int ret = 0;
 
 	pathname = kmalloc(PATH_MAX, KSMBD_DEFAULT_GFP);
@@ -946,14 +949,65 @@ int ksmbd_validate_name_reconnect(struct ksmbd_share_config *share,
 		return -EACCES;
 	}
 
-	if (name && strcmp(&ab_pathname[share->path_sz + 1], name)) {
+	if (!share->path || !share->path_sz ||
+	    strncmp(ab_pathname, share->path, share->path_sz))
+		goto outside_share;
+
+	rel = ab_pathname + share->path_sz;
+	if (share->path[share->path_sz - 1] != '/') {
+		if (*rel != '/' && *rel != '\0')
+			goto outside_share;
+		if (*rel == '/')
+			rel++;
+	}
+
+	if (name && strcmp(rel, name)) {
 		ksmbd_debug(SMB, "invalid name reconnect %s\n", name);
 		ret = -EINVAL;
 	}
+	goto out;
 
+outside_share:
+	ksmbd_debug(SMB, "durable fd is outside of share %s\n", share->name);
+	ret = -EINVAL;
+out:
 	kfree(pathname);
 
 	return ret;
+}
+
+int ksmbd_set_durable_owner(struct ksmbd_work *work, struct ksmbd_file *fp)
+{
+	struct ksmbd_user *user = work->sess->user;
+
+	if (!user || !work->tcon)
+		return -EINVAL;
+
+	fp->owner_name = kstrdup(user_name(user), KSMBD_DEFAULT_GFP);
+	fp->owner_share = kstrdup(work->tcon->share_conf->name,
+				  KSMBD_DEFAULT_GFP);
+	if (!fp->owner_name || !fp->owner_share) {
+		kfree(fp->owner_name);
+		kfree(fp->owner_share);
+		fp->owner_name = NULL;
+		fp->owner_share = NULL;
+		return -ENOMEM;
+	}
+	fp->owner_uid = user_uid(user);
+	return 0;
+}
+
+static bool ksmbd_durable_owner_match(struct ksmbd_work *work,
+				      struct ksmbd_file *fp)
+{
+	struct ksmbd_user *user = work->sess->user;
+
+	if (!user || !work->tcon || !fp->owner_name || !fp->owner_share)
+		return false;
+
+	return user_uid(user) == fp->owner_uid &&
+	       !strcmp(user_name(user), fp->owner_name) &&
+	       !strcmp(work->tcon->share_conf->name, fp->owner_share);
 }
 
 int ksmbd_reopen_durable_fd(struct ksmbd_work *work, struct ksmbd_file *fp)
@@ -963,6 +1017,12 @@ int ksmbd_reopen_durable_fd(struct ksmbd_work *work, struct ksmbd_file *fp)
 
 	if (!fp->is_durable || fp->conn || fp->tcon) {
 		pr_err("Invalid durable fd [%p:%p]\n", fp->conn, fp->tcon);
+		return -EBADF;
+	}
+
+	if (!ksmbd_durable_owner_match(work, fp)) {
+		ksmbd_debug(SMB, "durable fd %llu is owned by another user or share\n",
+			    fp->persistent_id);
 		return -EBADF;
 	}
 

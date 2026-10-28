@@ -3588,6 +3588,23 @@ int smb2_open(struct ksmbd_work *work)
 					      DURABLE_HANDLE_MAX_TIMEOUT);
 			else
 				fp->durable_timeout = 60;
+		} else {
+			/*
+			 * Classic durable handles carry no timeout, give them
+			 * one so that the scavenger can reclaim them.
+			 */
+			fp->durable_timeout = DURABLE_HANDLE_MAX_TIMEOUT;
+		}
+
+		/*
+		 * Remember who opened the handle, the reconnect is only
+		 * allowed for the same user on the same share.
+		 */
+		if (ksmbd_set_durable_owner(work, fp)) {
+			fp->is_durable = false;
+			fp->is_persistent = false;
+			fp->durable_timeout = 0;
+			dh_info.type = 0;
 		}
 	}
 
