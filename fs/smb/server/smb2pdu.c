@@ -563,6 +563,45 @@ int smb2_allocate_rsp_buf(struct ksmbd_work *work)
 }
 
 /**
+ * smb2_check_req_protection() - enforce session signing/encryption on a request
+ * @work:	smb work containing smb request buffer
+ * @req_hdr:	header of the current (possibly compounded) request
+ * @cmd:	SMB2 command of the current request
+ *
+ * A session that requires encryption only accepts requests that arrived in
+ * an SMB2 TRANSFORM message. A session that requires signing only accepts
+ * unencrypted requests that carry SMB2_FLAGS_SIGNED; the signature itself
+ * is verified later by ->check_sign_req().
+ *
+ * Return:      1 if the request may be processed, -EACCES otherwise
+ */
+static int smb2_check_req_protection(struct ksmbd_work *work,
+				     struct smb2_hdr *req_hdr,
+				     unsigned int cmd)
+{
+	struct ksmbd_session *sess = work->sess;
+
+	/* CANCEL only acts on requests already pending on this connection */
+	if (cmd == SMB2_CANCEL_HE)
+		return 1;
+
+	if (sess->enc_forced && !work->encrypted) {
+		pr_err_ratelimited("unencrypted request on encrypted session %llu\n",
+				   sess->id);
+		return -EACCES;
+	}
+
+	if (sess->sign && !work->encrypted &&
+	    !(req_hdr->Flags & SMB2_FLAGS_SIGNED)) {
+		pr_err_ratelimited("unsigned request on signed session %llu\n",
+				   sess->id);
+		return -EACCES;
+	}
+
+	return 1;
+}
+
+/**
  * smb2_check_user_session() - check for valid session for a user
  * @work:	smb work containing smb request buffer
  *
@@ -603,13 +642,13 @@ int smb2_check_user_session(struct ksmbd_work *work)
 					sess_id, work->sess->id);
 			return -EINVAL;
 		}
-		return 1;
+		return smb2_check_req_protection(work, req_hdr, cmd);
 	}
 
 	/* Check for validity of user session */
 	work->sess = ksmbd_session_lookup_all(conn, sess_id);
 	if (work->sess)
-		return 1;
+		return smb2_check_req_protection(work, req_hdr, cmd);
 	ksmbd_debug(SMB, "Invalid user session, Uid %llu\n", sess_id);
 	return -ENOENT;
 }
@@ -1535,6 +1574,13 @@ static int ntlm_authenticate(struct ksmbd_work *work,
 	    (req->SecurityMode & SMB2_NEGOTIATE_SIGNING_REQUIRED))
 		sess->sign = true;
 
+	/*
+	 * Mandatory encryption also applies to clients that did not negotiate
+	 * encryption, so that a downgraded dialect cannot bypass it.
+	 */
+	if (server_conf.flags & KSMBD_GLOBAL_FLAG_SMB2_ENCRYPTION)
+		sess->enc_forced = true;
+
 	if (smb3_encryption_negotiated(conn) &&
 			!(req->Flags & SMB2_SESSION_REQ_FLAG_BINDING)) {
 		rc = conn->ops->generate_encryptionkey(conn, sess);
@@ -1546,11 +1592,6 @@ static int ntlm_authenticate(struct ksmbd_work *work,
 		sess->enc = true;
 		if (server_conf.flags & KSMBD_GLOBAL_FLAG_SMB2_ENCRYPTION)
 			rsp->SessionFlags = SMB2_SESSION_FLAG_ENCRYPT_DATA_LE;
-		/*
-		 * signing is disable if encryption is enable
-		 * on this session
-		 */
-		sess->sign = false;
 	}
 
 binding_session:
@@ -1625,6 +1666,13 @@ static int krb5_authenticate(struct ksmbd_work *work,
 	    (req->SecurityMode & SMB2_NEGOTIATE_SIGNING_REQUIRED))
 		sess->sign = true;
 
+	/*
+	 * Mandatory encryption also applies to clients that did not negotiate
+	 * encryption, so that a downgraded dialect cannot bypass it.
+	 */
+	if (server_conf.flags & KSMBD_GLOBAL_FLAG_SMB2_ENCRYPTION)
+		sess->enc_forced = true;
+
 	if (smb3_encryption_negotiated(conn)) {
 		retval = conn->ops->generate_encryptionkey(conn, sess);
 		if (retval) {
@@ -1635,7 +1683,6 @@ static int krb5_authenticate(struct ksmbd_work *work,
 		sess->enc = true;
 		if (server_conf.flags & KSMBD_GLOBAL_FLAG_SMB2_ENCRYPTION)
 			rsp->SessionFlags = SMB2_SESSION_FLAG_ENCRYPT_DATA_LE;
-		sess->sign = false;
 	}
 
 	if (conn->dialect >= SMB30_PROT_ID) {
@@ -8805,12 +8852,11 @@ int smb2_notify(struct ksmbd_work *work)
  */
 bool smb2_is_sign_req(struct ksmbd_work *work, unsigned int command)
 {
-	struct smb2_hdr *rcv_hdr2 = smb2_get_msg(work->request_buf);
+	struct smb2_hdr *rcv_hdr2 = ksmbd_req_buf_next(work);
 
 	if ((rcv_hdr2->Flags & SMB2_FLAGS_SIGNED) &&
 	    command != SMB2_NEGOTIATE_HE &&
-	    command != SMB2_SESSION_SETUP_HE &&
-	    command != SMB2_OPLOCK_BREAK_HE)
+	    command != SMB2_SESSION_SETUP_HE)
 		return true;
 
 	return false;
@@ -9090,6 +9136,8 @@ int smb3_decrypt_req(struct ksmbd_work *work)
 	struct kvec iov[2];
 	int buf_data_size = pdu_length - sizeof(struct smb2_transform_hdr);
 	struct smb2_transform_hdr *tr_hdr = smb2_get_msg(buf);
+	struct smb2_hdr *hdr;
+	u64 tr_sess_id;
 	int rc = 0;
 
 	if (pdu_length < sizeof(struct smb2_transform_hdr) ||
@@ -9104,10 +9152,11 @@ int smb3_decrypt_req(struct ksmbd_work *work)
 		return -ECONNABORTED;
 	}
 
-	sess = ksmbd_session_lookup_all(work->conn, le64_to_cpu(tr_hdr->SessionId));
+	tr_sess_id = le64_to_cpu(tr_hdr->SessionId);
+	sess = ksmbd_session_lookup_all(work->conn, tr_sess_id);
 	if (!sess) {
 		pr_err("invalid session id(%llx) in transform header\n",
-		       le64_to_cpu(tr_hdr->SessionId));
+		       tr_sess_id);
 		return -ECONNABORTED;
 	}
 	ksmbd_user_session_put(sess);
@@ -9122,6 +9171,14 @@ int smb3_decrypt_req(struct ksmbd_work *work)
 
 	memmove(buf + 4, iov[1].iov_base, buf_data_size);
 	*(__be32 *)buf = cpu_to_be32(buf_data_size);
+
+	hdr = smb2_get_msg(buf);
+	if (hdr->ProtocolId != SMB2_PROTO_NUMBER ||
+	    le64_to_cpu(hdr->SessionId) != tr_sess_id) {
+		pr_err("session id(%llx) in transform header does not match the request\n",
+		       tr_sess_id);
+		return -ECONNABORTED;
+	}
 
 	return rc;
 }

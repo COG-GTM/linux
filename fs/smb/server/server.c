@@ -166,6 +166,7 @@ static void __handle_ksmbd_work(struct ksmbd_work *work,
 	u16 command = 0;
 	int rc;
 	bool is_chained = false;
+	bool sign_rsp;
 
 	if (conn->ops->is_transform_hdr &&
 	    conn->ops->is_transform_hdr(work->request_buf)) {
@@ -192,6 +193,9 @@ static void __handle_ksmbd_work(struct ksmbd_work *work,
 				if (rc == -EINVAL)
 					conn->ops->set_rsp_status(work,
 						STATUS_INVALID_PARAMETER);
+				else if (rc == -EACCES)
+					conn->ops->set_rsp_status(work,
+						STATUS_ACCESS_DENIED);
 				else
 					conn->ops->set_rsp_status(work,
 						STATUS_USER_SESSION_DELETED);
@@ -229,11 +233,14 @@ static void __handle_ksmbd_work(struct ksmbd_work *work,
 			}
 		}
 
+		sign_rsp = work->sess &&
+			   ((work->sess->sign && !work->encrypted) ||
+			    smb3_11_final_sess_setup_resp(work) ||
+			    conn->ops->is_sign_req(work, command));
+
 		is_chained = is_chained_smb2_message(work);
 
-		if (work->sess &&
-		    (work->sess->sign || smb3_11_final_sess_setup_resp(work) ||
-		     conn->ops->is_sign_req(work, command)))
+		if (sign_rsp)
 			conn->ops->set_sign_rsp(work);
 	} while (is_chained == true);
 
