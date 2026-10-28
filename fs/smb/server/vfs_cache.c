@@ -1005,12 +1005,68 @@ int ksmbd_init_file_table(struct ksmbd_file_table *ft)
 	return 0;
 }
 
+/*
+ * Files still referenced by an in-flight request are skipped by
+ * __close_file_table_ids(). Detach them from the table before its idr is
+ * freed so that the final ksmbd_fd_put() does not touch the freed idr.
+ */
+static void __detach_file_table_ids(struct ksmbd_file_table *ft)
+{
+	struct ksmbd_file *fp;
+	unsigned int id = 0;
+
+	while (1) {
+		write_lock(&ft->lock);
+		fp = idr_get_next(ft->idr, &id);
+		if (!fp) {
+			write_unlock(&ft->lock);
+			break;
+		}
+
+		if (!has_file_id(fp->volatile_id)) {
+			idr_remove(ft->idr, id);
+			id++;
+			write_unlock(&ft->lock);
+			continue;
+		}
+
+		/* final put in progress, wait for it to leave the idr */
+		if (!atomic_inc_not_zero(&fp->refcount)) {
+			write_unlock(&ft->lock);
+			cond_resched();
+			continue;
+		}
+		write_unlock(&ft->lock);
+
+		down_write(&fp->f_ci->m_lock);
+		write_lock(&ft->lock);
+		if (has_file_id(fp->volatile_id)) {
+			idr_remove(ft->idr, fp->volatile_id);
+			fp->volatile_id = KSMBD_NO_FID;
+		}
+		write_unlock(&ft->lock);
+		list_del_init(&fp->node);
+		up_write(&fp->f_ci->m_lock);
+
+		if (atomic_dec_and_test(&fp->refcount)) {
+			struct ksmbd_conn *conn = fp->conn;
+
+			set_close_state_blocked_works(fp);
+			__ksmbd_close_fd(ft, fp);
+			if (conn)
+				atomic_dec(&conn->stats.open_files_count);
+		}
+		id++;
+	}
+}
+
 void ksmbd_destroy_file_table(struct ksmbd_file_table *ft)
 {
 	if (!ft->idr)
 		return;
 
 	__close_file_table_ids(ft, NULL, session_fd_check);
+	__detach_file_table_ids(ft);
 	idr_destroy(ft->idr);
 	kfree(ft->idr);
 	ft->idr = NULL;
