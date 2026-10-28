@@ -515,6 +515,10 @@ struct ksmbd_file *ksmbd_lookup_fd_cguid(char *cguid)
 	struct ksmbd_file	*fp = NULL;
 	unsigned int		id;
 
+	/* Non-durable opens keep an all-zero create GUID; never match them. */
+	if (!memchr_inv(cguid, 0, SMB2_CREATE_GUID_SIZE))
+		return NULL;
+
 	read_lock(&global_ft.lock);
 	idr_for_each_entry(global_ft.idr, fp, id) {
 		if (!memcmp(fp->create_guid,
