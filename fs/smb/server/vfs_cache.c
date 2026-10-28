@@ -492,9 +492,9 @@ struct ksmbd_file *ksmbd_lookup_durable_fd(unsigned long long id)
 
 	fp = __ksmbd_lookup_fd(&global_ft, id);
 	if (fp && (fp->conn ||
-		   (fp->durable_scavenger_timeout &&
-		    (fp->durable_scavenger_timeout <
-		     jiffies_to_msecs(jiffies))))) {
+		   !fp->durable_scavenger_timeout ||
+		   fp->durable_scavenger_timeout <
+		   jiffies_to_msecs(jiffies))) {
 		ksmbd_put_durable_fd(fp);
 		fp = NULL;
 	}
@@ -783,13 +783,14 @@ static int ksmbd_durable_scavenger(void *dummy)
 
 		write_lock(&global_ft.lock);
 		idr_for_each_entry(global_ft.idr, fp, id) {
-			if (!fp->durable_timeout)
-				continue;
-
 			if (atomic_read(&fp->refcount) > 1 ||
 			    fp->conn)
 				continue;
 
+			/*
+			 * Only disconnected durable handles are left without a
+			 * conn; one without a deadline is expired, not eternal.
+			 */
 			found_fp_timeout = true;
 			if (fp->durable_scavenger_timeout <=
 			    jiffies_to_msecs(jiffies)) {
@@ -882,13 +883,14 @@ static bool session_fd_check(struct ksmbd_tree_connect *tcon,
 	}
 	up_write(&ci->m_lock);
 
+	if (!fp->durable_timeout)
+		fp->durable_timeout = DURABLE_HANDLE_DEFAULT_TIMEOUT;
+	fp->durable_scavenger_timeout =
+		jiffies_to_msecs(jiffies) + fp->durable_timeout;
+
 	fp->conn = NULL;
 	fp->tcon = NULL;
 	fp->volatile_id = KSMBD_NO_FID;
-
-	if (fp->durable_timeout)
-		fp->durable_scavenger_timeout =
-			jiffies_to_msecs(jiffies) + fp->durable_timeout;
 
 	return true;
 }
