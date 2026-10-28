@@ -41,6 +41,7 @@ struct ksmbd_session {
 
 	bool				sign;
 	bool				enc;
+	bool				enc_forced;
 	bool				is_anonymous;
 
 	int				state;
