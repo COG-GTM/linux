@@ -987,3 +987,7 @@ int ksmbd_ipc_init(void)
 
 	return ret;
 }
+
+#ifdef CONFIG_SMB_SERVER_KUNIT_TEST
+#include "transport_ipc_test.c"
+#endif
